@@ -154,6 +154,9 @@
     *, *::before { transition: none !important; animation: none !important; }
     .tile.hi { transform: none; }
   }
+  #reconnect { display: none; position: fixed; inset: auto 12px 64px 12px; z-index: 22; padding: 18px; border-radius: 14px;
+    background: var(--accent); color: var(--accent-text); font-size: 20px; text-align: center; text-decoration: none; }
+  #reconnect.show { display: block; }
   /* ------------------------------------------------------------ multi-device */
   #deviceBar { display: none; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px;
     background: var(--surface); border: 1px solid var(--line); font-size: 15px; color: var(--muted); flex: none; }
@@ -189,6 +192,7 @@
   <p style="font-size:14px">Turns on the voice and the camera on this device.</p>
 </div>
 
+<a id="reconnect" href="http://sirenize.local:8080/go">Board restarted? <b>Tap to reconnect</b></a>
 <div id="deviceBar"><span id="deviceText"></span><span class="spacer"></span>
   <button id="voiceBtn" hidden>Turn on voice</button><button id="talkHere">Talk here</button></div>
 
@@ -286,6 +290,7 @@ const DEVICE_NAME = deviceName();
 // ------------------------------------------------------------------ state
 const $ = (id) => document.getElementById(id);
 let S = null;                    // last STATE from the server
+let downSince = 0;
 let ws = null, rtt = null, pingN = 0;
 const pings = {};
 let audioUnlocked = false, currentAudio = null, voiceId = null;
@@ -456,20 +461,32 @@ function onVoiceChange() {
 }
 
 function speak(text) {
-  if (!isActive() || settings.voice !== "on" || !audioUnlocked) return;
-  releaseMicWhileSpeaking(Math.min(9000, 1500 + text.length * 90));
-  // 1) prefetched clip  2) live /tts  3) speechSynthesis
-  if (TTS_ENABLED && S && S.voice && S.voice.tts) {
-    const src = audioCache.get(cacheKey(text)) || ttsUrl(text);
-    stopSpeech();
-    player.onerror = () => speakLocal(text);    // no network and not cached -> device voice
-    player.src = src;
-    currentAudio = player;
-    player.play().catch(() => speakLocal(text));
+  if (!isActive() || settings.voice !== "on" || !audioUnlocked) {
+    reportAudio(`skipped (active=${isActive()}, voice setting=${settings.voice}, tapped to unlock=${audioUnlocked})`, text);
     return;
   }
-  speakLocal(text);
+  releaseMicWhileSpeaking(Math.min(9000, 1500 + text.length * 90));
+  // 1) prefetched clip  2) live /tts  3) speechSynthesis
+  const hadMic = micReleased;
+  const go = () => {
+    if (TTS_ENABLED && S && S.voice && S.voice.tts) {
+      const src = audioCache.get(cacheKey(text)) || ttsUrl(text);
+      stopSpeech();
+      player.onerror = () => { reportAudio("audio error " + (player.error && player.error.code), text); speakLocal(text); };
+      player.src = src;
+      player.volume = 1;
+      currentAudio = player;
+      player.play().then(() => reportAudio("playing", text))
+        .catch((e) => { reportAudio("play() refused: " + (e && e.name), text); speakLocal(text); });
+      return;
+    }
+    speakLocal(text);
+  };
+  // iOS needs a moment to leave "recording" mode after the mic is released, or the sound is dropped.
+  if (hadMic) setTimeout(go, 350); else go();
 }
+
+function reportAudio(what, text) { wsSend({ type: "AUDIO", what, text: String(text).slice(0, 60), unlocked: audioUnlocked }); }
 
 function speakLocal(text) {
   if (!("speechSynthesis" in window)) return;
@@ -614,7 +631,7 @@ $("homeBtn").addEventListener("click", (e) => { e.stopPropagation(); wsSend({ ty
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?device=${encodeURIComponent(deviceId)}&name=${encodeURIComponent(DEVICE_NAME)}`);
-  ws.onopen = () => { renderStatus(); if (document.visibilityState === "visible") claim(false); };
+  ws.onopen = () => { downSince = 0; $("reconnect").classList.remove("show"); renderStatus(); if (document.visibilityState === "visible") claim(false); };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === "STATE") {
@@ -636,7 +653,14 @@ function connect() {
       renderStatus();
     }
   };
-  ws.onclose = () => { renderStatus(); setTimeout(connect, 1000); };
+  ws.onclose = () => {
+    renderStatus();
+    // The public link changes when the board restarts. After 10 s down, offer the /go link,
+    // which always forwards to the current one (same hotspot/Wi-Fi as the board).
+    if (!downSince) downSince = Date.now();
+    if (Date.now() - downSince > 10000) $("reconnect").classList.add("show");
+    setTimeout(connect, 1000);
+  };
   ws.onerror = () => ws.close();
 }
 

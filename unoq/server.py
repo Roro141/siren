@@ -433,6 +433,8 @@ async def ws_handler(request):
                     state["row_hidden"] = bool(data.get("hidden"))
                     state["highlight"] = -1
                     await push_state()
+                elif kind == "AUDIO":
+                    log(f"AUDIO on {dev_name}: {str(data.get('what'))[:80]} ({str(data.get('text'))[:40]!r}, unlocked={data.get('unlocked')})")
                 elif kind == "SHOWN" and dev_id == active["id"]:
                     await phone_message(data)
     finally:
@@ -559,29 +561,37 @@ async def select_index(i, via):
             rec["status"] = "answered"
             log(f"ANSWER {q['id']}: {text!r} after {rec['answer_ms']} ms")
             await to_dashboards({"type": "QUESTION_UPDATE", "question": rec})
-        await add_convo(text, "answer", qid=q["id"])
         state["question"] = None
         state["highlight"] = -1
-        kind = "answer"
+        state["spoken"] = {"text": text, "kind": "answer", "asker": "", "seq": spoken_seq}
+        await to_phones({"type": "SELECT", "index": i, "text": text, "seq": spoken_seq})
+        await push_state()
+        try:
+            await add_convo(text, "answer", qid=q["id"])
+        except Exception as e:
+            log(f"logging skipped: {e.__class__.__name__}: {e}")
     else:
         source = "tap" if via == "tap" else ("grid" if item["source"] == "fixed" else "suggested")
-        await add_convo(text, source)
-        if via == "nod":
-            write_trial(text, item["source"], moves_since_select,
-                        int((time.time() - first_move_ts) * 1000) if first_move_ts else 0)
+        # Speak and show it on every screen FIRST; logging can never delay or block her voice.
+        state["spoken"] = {"text": text, "kind": "said", "asker": "", "seq": spoken_seq}
+        await to_phones({"type": "SELECT", "index": i, "text": text, "seq": spoken_seq})
+        await push_state()
+        try:
+            await add_convo(text, source)
+            if via == "nod":
+                write_trial(text, item["source"], moves_since_select,
+                            int((time.time() - first_move_ts) * 1000) if first_move_ts else 0)
+        except Exception as e:
+            log(f"logging skipped: {e.__class__.__name__}: {e}")
         if _norm(text) in {_norm(u) for u in urgent_list()}:
             alert = {"text": text, "ts": int(time.time() * 1000)}
             log(f"URGENT: {text!r}")
             notify_watch(text)
             await to_dashboards({"type": "ALERT", "alert": alert})
-        kind = "said"
     if text != SOMETHING_ELSE:
         recent_said.insert(0, text)
         del recent_said[5:]
     moves_since_select, first_move_ts = 0, None
-    state["spoken"] = {"text": text, "kind": kind, "asker": "", "seq": spoken_seq}
-    await to_phones({"type": "SELECT", "index": i, "text": text, "seq": spoken_seq})
-    await push_state()
 
 
 def offline_phrases():
@@ -730,7 +740,10 @@ async def add_convo(text, source, **extra):
             w.writerow(["time", "phrase", "how", "urgent"])
         w.writerow([datetime.now().isoformat(timespec="seconds"), text, source,
                     "yes" if _norm(text) in {_norm(u) for u in urgent_list()} else ""])
-    await to_dashboards({"type": "SUMMARY", "summary": data_summary()})
+    try:
+        await to_dashboards({"type": "SUMMARY", "summary": data_summary()})
+    except Exception as e:                    # data problems must never block speaking
+        log(f"dashboard summary skipped: {e.__class__.__name__}: {e}")
     await to_dashboards({"type": "CONVO", "entry": entry})
     return entry
 
@@ -1783,6 +1796,7 @@ def data_summary():
     today = datetime.now().date().isoformat()
     by_how, phrases = {}, {}
     urgent_today = 0
+    rows = [r for r in rows if r.get("time") and r.get("phrase") is not None and r.get("how")]
     for r in rows:
         by_how[r["how"]] = by_how.get(r["how"], 0) + 1
         phrases[r["phrase"]] = phrases.get(r["phrase"], 0) + 1
@@ -1791,10 +1805,14 @@ def data_summary():
     trials = read_csv(TRIALS)
     speed = {}
     for t in trials:
-        a = speed.setdefault(t["source"], {"n": 0, "moves": 0, "ms": 0})
+        try:
+            moves, ms = int(t["moves_since_last_select"]), int(t["ms_since_first_move"])
+        except (TypeError, ValueError, KeyError):
+            continue                      # skip a damaged line (e.g. written during a power cut)
+        a = speed.setdefault(t.get("source") or "fixed", {"n": 0, "moves": 0, "ms": 0})
         a["n"] += 1
-        a["moves"] += int(t["moves_since_last_select"])
-        a["ms"] += int(t["ms_since_first_move"])
+        a["moves"] += moves
+        a["ms"] += ms
     return {
         "total": len(rows),
         "today": sum(1 for r in rows if r["time"].startswith(today)),

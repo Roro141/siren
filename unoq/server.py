@@ -38,7 +38,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import serial
@@ -50,7 +50,16 @@ TRIALS = os.path.join(HERE, "trials.csv")
 GESTURES = ("LEFT", "RIGHT", "NOD")
 FAKE_TYPES = GESTURES + ("HOME",)
 PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*")
-FIXED_PHRASES = ["I need help", "I need water", "Bathroom", "I'm in pain", "Yes", "No", "Thank you"]
+GRID = [  # never reorder: motor memory. Same order on every device.
+    {"text": "I need help", "cat": "help"},
+    {"text": "I need water", "cat": "care"},
+    {"text": "Bathroom", "cat": "care"},
+    {"text": "I'm in pain", "cat": "care"},
+    {"text": "Yes", "cat": "neutral"},
+    {"text": "No", "cat": "neutral"},
+    {"text": "Thank you", "cat": "social"},
+]
+FIXED_PHRASES = [g["text"] for g in GRID]
 
 PROFILE = os.path.join(HERE, "profile.json")
 CUSTOM_PHRASES = os.path.join(HERE, "phrases.json")
@@ -69,6 +78,9 @@ PROMPT = (
     "comfort, help, people). If a person is visible, include a social phrase (e.g. \"Hi\", \"Thank you\", "
     "\"Can you help me?\"). Never identify or name people, never guess age/gender/ethnicity, never give "
     "medical advice. If the image is dark, blurry or empty, return low confidence and generic helpful phrases.\n"
+    "Ignore TV, monitor, laptop and phone screens (and whatever they show) when any other object is visible; "
+    "base the phrases on the real objects instead. Only suggest screen-related phrases if a screen is the only "
+    "thing in view.\n"
     "Context: recent phrases said = {recent}; local time = {local_time}.\n"
     "Return JSON: {{\"scene\": \"<6-10 word description>\", \"phrases\": [4 strings], \"confidence\": 0.0-1.0}}."
 )
@@ -117,6 +129,29 @@ camera_state = {"scene": "", "phrases": [], "ms": None, "ok": None, "reason": ""
 health = {"gemini": {"ok": None, "err": ""}, "internet": {"ok": None, "err": ""}}
 last_phone_rtt = None
 q_counter = 0
+
+# Server-owned state for every talking screen (phone, iPad, ...). Broadcast in full on every change.
+state = {
+    "highlight": -1,                                   # index into scan_order(); -1 = start
+    "suggestions": {"phrases": [], "source": "offline", "scene": ""},
+    "question": None,                                  # {"id","question","options","asker"}
+    "spoken": None,                                    # {"text","kind","asker","seq"}
+    "row_hidden": False,
+}
+devices = {}            # ws -> {"id", "name"}
+active = {"id": None, "name": ""}
+last_seen = {}          # device id -> last message time
+release_handle = None   # pending release of a disconnected active device
+tz_offset_min = 0       # active device's UTC offset (for time-of-day phrases)
+last_tilt = 0.0
+moves_since_select = 0
+first_move_ts = None
+pending_sugg = None
+pending_question = None
+spoken_seq = 0
+ACTIVE_STALE_S = 60     # auto-claim allowed if the active device was silent this long
+RELEASE_AFTER_S = 10    # release active after this long disconnected
+
 SOURCE = "serial"           # "serial" (Mega over USB) or "bridge" (UNO Q sensor app)
 last_heartbeat = 0.0
 calibrate_requested = False
@@ -164,13 +199,8 @@ def find_port(forced):
 
 async def broadcast(gesture, source):
     counts[gesture] += 1
-    msg = json.dumps({"type": gesture, "server_ms": int(time.time() * 1000)})
     log(f"EVENT {gesture:<5} #{counts[gesture]:<3} ({source}) -> {len(clients)} client(s)")
-    for ws in list(clients):
-        try:
-            await ws.send_str(msg)
-        except Exception:
-            clients.discard(ws)
+    await handle_gesture(gesture)
     await to_dashboards({"type": gesture, "server_ms": int(time.time() * 1000), "source": source,
                          "phone_rtt": last_phone_rtt})
 
@@ -221,8 +251,9 @@ def health_snapshot():
         "sensor": {"ok": headband_ok(),
                    "err": "" if headband_ok() else ("Mega not connected" if not mega_connected
                                                     else "Mega connected, but the tilt sensor (GY-521) is not responding: check its wires")},
-        "phone": {"ok": len(clients) > 0, "err": "" if clients else "no phone page connected",
-                  "rtt": last_phone_rtt},
+        "phone": {"ok": len(clients) > 0, "err": "" if clients else "no talking screen connected",
+                  "rtt": last_phone_rtt, "active": active["name"],
+                  "devices": sorted({d["name"] for d in devices.values()})},
         "gemini": health["gemini"],
         # TODO(/tts): report the real ElevenLabs status once Test 4 adds /tts.
         "elevenlabs": {"ok": None, "err": "not set up yet (using the phone's built-in voice)"},
@@ -327,13 +358,21 @@ async def calibrate(_request):
 async def ws_handler(request):
     if request.query.get("role") == "dashboard":
         return await dashboard_ws(request)
-    global last_phone_rtt
+    global last_phone_rtt, release_handle
     ws = web.WebSocketResponse(heartbeat=10)
     await ws.prepare(request)
+    dev_id = (request.query.get("device") or f"anon-{id(ws)}")[:64]
+    dev_name = (request.query.get("name") or "Device")[:32]
+    devices[ws] = {"id": dev_id, "name": dev_name}
+    last_seen[dev_id] = time.time()
     clients.add(ws)
-    log(f"Page connected ({len(clients)} client(s))")
+    log(f"Page connected: {dev_name} [{dev_id[:6]}] ({len(clients)} client(s))")
+    if dev_id == active["id"] and release_handle:
+        release_handle.cancel()
+        release_handle = None
+        log(f"Active device {dev_name} reconnected")
     await ws.send_str(json.dumps({"mega": headband_ok()}))
-    await ws.send_str(json.dumps({"type": "PHRASES", "phrases": load_custom_phrases()}))
+    await ws.send_str(json.dumps(public_state()))
     await to_dashboards({"type": "HEALTH", **health_snapshot()})
     try:
         async for msg in ws:
@@ -342,18 +381,261 @@ async def ws_handler(request):
                     data = json.loads(msg.data)
                 except ValueError:
                     continue
+                last_seen[dev_id] = time.time()
+                kind = data.get("type")
                 if "ping" in data:
                     await ws.send_str(json.dumps({"pong": data["ping"]}))
                 elif "rtt" in data:
-                    last_phone_rtt = data["rtt"]
-                    log(f"Page round-trip: {data['rtt']} ms")
-                elif data.get("type") in ("SAID", "ANSWER", "SHOWN", "EXPIRED"):
+                    if dev_id == active["id"]:
+                        last_phone_rtt = data["rtt"]
+                elif kind == "CLAIM":
+                    await claim(dev_id, dev_name, bool(data.get("force")), data.get("tz"))
+                elif kind == "INPUT" and data.get("gesture") in FAKE_TYPES:
+                    await broadcast(data["gesture"], f"keys:{dev_name}")
+                elif kind == "TAP":
+                    try:
+                        await select_index(int(data.get("index")), via="tap")
+                    except (TypeError, ValueError):
+                        pass
+                elif kind == "CAMERA" and dev_id == active["id"] and not data.get("on"):
+                    go_offline()
+                elif kind == "ROW":
+                    state["row_hidden"] = bool(data.get("hidden"))
+                    state["highlight"] = -1
+                    await push_state()
+                elif kind == "SHOWN" and dev_id == active["id"]:
                     await phone_message(data)
     finally:
         clients.discard(ws)
-        log(f"Page disconnected ({len(clients)} client(s))")
+        devices.pop(ws, None)
+        log(f"Page disconnected: {dev_name} ({len(clients)} client(s))")
+        if dev_id == active["id"] and not any(d["id"] == dev_id for d in devices.values()):
+            schedule_release(dev_id)
         await to_dashboards({"type": "HEALTH", **health_snapshot()})
     return ws
+
+
+# ---------------------------------------------------------------- shared state machine
+def grid_items():
+    custom = [{"text": p["text"], "cat": p.get("category", "neutral")} for p in load_custom_phrases()]
+    return (GRID + custom)[:12]
+
+
+def row_visible():
+    return bool(state["question"]) or not state["row_hidden"]
+
+
+def scan_order():
+    items = []
+    if state["question"]:
+        opts = (state["question"]["options"] + [""] * 4)[:4]
+        items += [{"text": o, "source": "answer"} for o in opts]
+    elif not state["row_hidden"]:
+        phr = (state["suggestions"]["phrases"] + [""] * 4)[:4]
+        items += [{"text": p, "source": "suggested"} for p in phr]
+    items += [{"text": g["text"], "source": "fixed"} for g in grid_items()]
+    return items
+
+
+def public_state():
+    return {"type": "STATE", "highlight": state["highlight"], "suggestions": state["suggestions"],
+            "question": state["question"], "spoken": state["spoken"], "row_hidden": state["row_hidden"],
+            "grid": grid_items(), "active": dict(active), "mega": headband_ok()}
+
+
+async def push_state():
+    await to_phones(public_state())
+
+
+async def claim(dev_id, dev_name, force, tz=None):
+    global release_handle, tz_offset_min
+    cur = active["id"]
+    stale = cur is None or time.time() - last_seen.get(cur, 0) > ACTIVE_STALE_S \
+        or not any(d["id"] == cur for d in devices.values()) and release_handle is None
+    if cur == dev_id or force or stale:
+        if cur != dev_id:
+            log(f"Active device: {dev_name} [{dev_id[:6]}] ({'tap' if force else 'auto'}; was {active['name'] or 'none'})")
+        active.update({"id": dev_id, "name": dev_name})
+        if release_handle:
+            release_handle.cancel()
+            release_handle = None
+        try:
+            tz_offset_min = int(tz)
+        except (TypeError, ValueError):
+            pass
+        await push_state()
+        await to_dashboards({"type": "HEALTH", **health_snapshot()})
+
+
+def schedule_release(dev_id):
+    global release_handle
+
+    def release():
+        global release_handle
+        release_handle = None
+        if active["id"] == dev_id and not any(d["id"] == dev_id for d in devices.values()):
+            log(f"Active device {active['name']} gone for {RELEASE_AFTER_S} s: released")
+            active.update({"id": None, "name": ""})
+            asyncio.ensure_future(push_state())
+            asyncio.ensure_future(to_dashboards({"type": "HEALTH", **health_snapshot()}))
+
+    if release_handle:
+        release_handle.cancel()
+    release_handle = loop.call_later(RELEASE_AFTER_S, release)
+
+
+async def handle_gesture(g):
+    global last_tilt, moves_since_select, first_move_ts
+    now = time.time()
+    if g == "HOME":
+        state["highlight"] = -1
+        moves_since_select, first_move_ts = 0, None
+    elif g in ("LEFT", "RIGHT"):
+        last_tilt = now
+        moves_since_select += 1
+        if first_move_ts is None:
+            first_move_ts = now
+        n = len(scan_order())
+        h = state["highlight"]
+        if g == "RIGHT":
+            h = 0 if h < 0 else (h + 1) % n
+        else:
+            h = n - 1 if h < 0 else (h - 1 + n) % n
+        state["highlight"] = h
+    elif g == "NOD":
+        last_tilt = now
+        if state["highlight"] >= 0:
+            await select_index(state["highlight"], via="nod")
+            return
+    await push_state()
+
+
+async def select_index(i, via):
+    """Select scan-order item i (NOD on the highlight, or a tap on a tile)."""
+    global spoken_seq, moves_since_select, first_move_ts, alert
+    items = scan_order()
+    if not (0 <= i < len(items)) or not items[i]["text"]:
+        return
+    item = items[i]
+    text = item["text"]
+    spoken_seq += 1
+    q = state["question"]
+    if item["source"] == "answer" and q:
+        rec = questions.get(q["id"])
+        if rec and rec.get("answer") is None:
+            rec["answer"] = text
+            rec["answer_ms"] = int(time.time() * 1000) - rec["sent_ts"]
+            rec["status"] = "answered"
+            log(f"ANSWER {q['id']}: {text!r} after {rec['answer_ms']} ms")
+            await to_dashboards({"type": "QUESTION_UPDATE", "question": rec})
+        await add_convo(text, "answer", qid=q["id"])
+        state["question"] = None
+        state["highlight"] = -1
+        kind = "answer"
+    else:
+        source = "tap" if via == "tap" else ("grid" if item["source"] == "fixed" else "suggested")
+        await add_convo(text, source)
+        if via == "nod":
+            write_trial(text, item["source"], moves_since_select,
+                        int((time.time() - first_move_ts) * 1000) if first_move_ts else 0)
+        if _norm(text) in {_norm(u) for u in urgent_list()}:
+            alert = {"text": text, "ts": int(time.time() * 1000)}
+            log(f"URGENT: {text!r}")
+            notify_watch(text)
+            await to_dashboards({"type": "ALERT", "alert": alert})
+        kind = "said"
+    if text != SOMETHING_ELSE:
+        recent_said.insert(0, text)
+        del recent_said[5:]
+    moves_since_select, first_move_ts = 0, None
+    state["spoken"] = {"text": text, "kind": kind, "asker": "", "seq": spoken_seq}
+    await to_phones({"type": "SELECT", "index": i, "text": text, "seq": spoken_seq})
+    await push_state()
+
+
+def offline_phrases():
+    t = datetime.now(timezone.utc) + timedelta(minutes=tz_offset_min)
+    m = t.hour * 60 + t.minute
+    out = []
+    if 5 * 60 <= m < 12 * 60:
+        out.append("Good morning")
+    if 11 * 60 + 30 <= m <= 13 * 60 + 30 or 17 * 60 + 30 <= m <= 19 * 60 + 30:
+        out.append("I'm hungry")
+    if m >= 21 * 60 or m < 5 * 60:
+        out.append("I'm tired")
+    out += [r for r in recent_said[:2] if _norm(r) not in FIXED_NORM]
+    out += ["Can you help me?", "Please come here", "I'm cold", "Please wait"]
+    seen, res = set(), []
+    for p in out:
+        if _norm(p) not in seen:
+            seen.add(_norm(p))
+            res.append(p)
+    return res[:4]
+
+
+def offer_suggestions(phrases, source, scene=""):
+    """Queue new suggestions. Stable slots: phrases still suggested keep their tile."""
+    global pending_sugg
+    seen = {p.lower() for p in phrases}
+    incoming = (list(phrases) + [p for p in offline_phrases() if p.lower() not in seen])[:4]
+    cur = state["suggestions"]["phrases"]
+    keep = [p if any(q.lower() == p.lower() for q in incoming) else None for p in cur]
+    fresh = [q for q in incoming if not any(p and p.lower() == q.lower() for p in keep)]
+    merged = [(p or (fresh.pop(0) if fresh else "")) for p in keep] + fresh
+    merged = merged[:4]
+    if merged == cur and source == state["suggestions"]["source"]:
+        pending_sugg = None
+        if scene and scene != state["suggestions"].get("scene"):
+            state["suggestions"]["scene"] = scene
+            asyncio.ensure_future(push_state())
+        return
+    pending_sugg = {"phrases": merged, "source": source, "scene": scene}
+
+
+def go_offline():
+    offer_suggestions(offline_phrases(), "offline", "")
+
+
+async def scheduler():
+    """Apply queued questions/suggestions only while the user is not moving."""
+    global pending_sugg, pending_question
+    while True:
+        await asyncio.sleep(0.2)
+        idle = time.time() - last_tilt
+        if pending_question and idle >= 1.0:
+            q, pending_question = pending_question, None
+            state["question"] = q
+            state["highlight"] = 0
+            state["spoken"] = {"text": q["question"], "kind": "question", "asker": q["asker"], "seq": spoken_seq}
+            asyncio.ensure_future(expire_question(q["id"]))
+            await push_state()
+        if pending_sugg and idle >= 3.0:
+            state["suggestions"], pending_sugg = pending_sugg, None
+            await push_state()
+
+
+async def expire_question(qid):
+    await asyncio.sleep(180)
+    if state["question"] and state["question"]["id"] == qid:
+        rec = questions.get(qid)
+        if rec and rec.get("answer") is None:
+            rec["status"] = "expired"
+            await to_dashboards({"type": "QUESTION_UPDATE", "question": rec})
+        log(f"QUESTION {qid} expired unanswered")
+        state["question"] = None
+        state["highlight"] = -1
+        await push_state()
+
+
+def write_trial(phrase, source, moves, ms):
+    new = not os.path.exists(TRIALS)
+    with open(TRIALS, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({"ts": datetime.now().isoformat(timespec="seconds"), "phrase": phrase[:80],
+                    "source": "suggested" if source == "suggested" else "fixed",
+                    "moves_since_last_select": moves, "ms_since_first_move": ms})
 
 
 # ---------------------------------------------------------------- dashboard / conversation
@@ -462,6 +744,12 @@ async def dashboard_ws(request):
     return ws
 
 
+def static_file(name, ctype):
+    async def handler(_request):
+        return web.FileResponse(os.path.join(PUBLIC, name), headers={"Content-Type": ctype})
+    return handler
+
+
 async def dashboard_page(_request):
     return web.FileResponse(os.path.join(PUBLIC, "dashboard.html"), headers=NO_CACHE)
 
@@ -565,8 +853,8 @@ async def ask(request):
     questions[qid] = q
     while len(questions) > 50:
         questions.pop(next(iter(questions)))
-    await to_phones({"type": "QUESTION", "id": qid, "question": question, "options": options,
-                     "asker": caregiver or ""})
+    global pending_question
+    pending_question = {"id": qid, "question": question, "options": options, "asker": caregiver or ""}
     await to_dashboards({"type": "QUESTION_UPDATE", "question": q})
     await to_dashboards({"type": "HEALTH", **health_snapshot()})
     log(f"ASK {qid} ({int((time.time()-t0)*1000)} ms, gemini {gem_ms} ms) {question!r} -> {options}")
@@ -574,12 +862,15 @@ async def ask(request):
 
 
 async def ack(_request):
-    global alert
+    global alert, spoken_seq
     name, caregiver = names()
     alert = None
     reply = f"{caregiver} is coming" if caregiver else "Help is coming"
     await to_dashboards({"type": "ALERT_CLEAR"})
-    await to_phones({"type": "SAY", "text": reply})
+    spoken_seq += 1
+    state["spoken"] = {"text": reply, "kind": "message", "asker": "", "seq": spoken_seq}
+    await to_phones({"type": "SAY", "text": reply, "seq": spoken_seq})
+    await push_state()
     await add_convo(reply, "caregiver")
     log(f"ACK: phone says {reply!r}")
     return web.json_response({"ok": True, "reply": reply})
@@ -617,7 +908,7 @@ async def add_phrase(request):
     with open(CUSTOM_PHRASES, "w", encoding="utf-8") as f:
         json.dump(phrases, f, indent=2, ensure_ascii=False)
     # TODO(/tts): generate and cache the ElevenLabs clip here, then report "Ready in her voice".
-    await to_phones({"type": "PHRASES", "phrases": phrases})
+    await push_state()
     await to_dashboards({"type": "PHRASES", "phrases": phrases})
     log(f"PHRASE added: {text!r} ({category})")
     return web.json_response({"ok": True, "phrases": phrases,
@@ -631,6 +922,27 @@ def tunnel_url():
         return url if url.startswith("https://") else ""
     except OSError:
         return ""
+
+
+def lan_ip():
+    import socket
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("1.1.1.1", 80))
+        ip = sk.getsockname()[0]
+        sk.close()
+        return ip
+    except OSError:
+        return ""
+
+
+async def links(request):
+    import socket
+    port = request.url.port or 8080
+    host = socket.gethostname()
+    return web.json_response({"go": f"http://{host}.local:{port}/go",
+                              "go_ip": f"http://{lan_ip()}:{port}/go" if lan_ip() else "",
+                              "tunnel": tunnel_url()})
 
 
 async def go(_request):
@@ -739,6 +1051,9 @@ def clean_phrases(raw):
 
 async def predict(request):
     t0 = time.time()
+    dev = request.headers.get("X-Device", "")
+    if dev and active["id"] and dev != active["id"]:
+        return web.json_response({"ok": False, "reason": "not the active device", "ms": 0})
 
     def fail(reason, status=None):
         ms = int((time.time() - t0) * 1000)
@@ -747,6 +1062,7 @@ async def predict(request):
             health["gemini"] = {"ok": False, "err": reason}
             camera_state.update({"ok": False, "reason": reason, "ms": ms, "ts": int(time.time() * 1000)})
             asyncio.ensure_future(to_dashboards({"type": "CAMERA", "camera": camera_state}))
+            go_offline()
         out = {"ok": False, "reason": reason, "ms": ms}
         if status:
             out["status"] = status
@@ -810,6 +1126,10 @@ async def predict(request):
     camera_state.update({"scene": scene, "phrases": phrases, "ms": ms, "ok": True, "reason": "",
                          "confidence": conf, "ts": int(time.time() * 1000)})
     await to_dashboards({"type": "CAMERA", "camera": camera_state})
+    if phrases and conf >= 0.4:
+        offer_suggestions(phrases, "camera", scene)
+    elif not state["suggestions"]["phrases"]:
+        go_offline()
     if not phrases:
         return web.json_response({"ok": False, "reason": "no valid phrases", "scene": scene, "ms": ms})
     return web.json_response({"ok": True, "scene": scene, "phrases": phrases, "confidence": conf, "ms": ms})
@@ -864,12 +1184,16 @@ async def on_startup(_app):
     loop = asyncio.get_running_loop()
     http = aiohttp.ClientSession()
     _app["internet_task"] = asyncio.ensure_future(internet_loop())
+    _app["scheduler_task"] = asyncio.ensure_future(scheduler())
+    go_offline()
+    state["suggestions"], _ = {"phrases": offline_phrases(), "source": "offline", "scene": ""}, None
     if SOURCE == "bridge":
         _app["watchdog_task"] = asyncio.ensure_future(heartbeat_watchdog())
 
 
 async def on_cleanup(_app):
     _app["internet_task"].cancel()
+    _app["scheduler_task"].cancel()
     if "watchdog_task" in _app:
         _app["watchdog_task"].cancel()
     await http.close()
@@ -901,6 +1225,10 @@ def main():
     app.router.add_post("/phrases", local_only(add_phrase))
     app.router.add_post("/ack", local_only(ack))
     app.router.add_get("/go", go)
+    app.router.add_get("/links", local_only(links))
+    app.router.add_get("/manifest.webmanifest", static_file("manifest.webmanifest", "application/manifest+json"))
+    app.router.add_get("/icon-180.png", static_file("icon-180.png", "image/png"))
+    app.router.add_get("/icon-512.png", static_file("icon-512.png", "image/png"))
     app.router.add_post("/event/{gesture}", local_only(bridge_event))
     app.router.add_post("/heartbeat", local_only(heartbeat))
     app.router.add_post("/sensor_status", local_only(sensor_status))

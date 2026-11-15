@@ -81,6 +81,9 @@
   #events li { padding: 3px 0; border-bottom: 1px solid var(--line); display: flex; gap: 12px; }
   #events b { color: var(--text); width: 52px; }
   #camScene { font-size: 16px; margin-bottom: 8px; }
+  .qr { background: #fff; padding: 10px; border-radius: 10px; width: 164px; height: 164px; }
+  .qr img, .qr canvas { width: 144px !important; height: 144px !important; }
+  .qrcap { margin-top: 6px; max-width: 220px; word-break: break-all; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip { padding: 5px 10px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--line); font-size: 14px; }
 
@@ -152,6 +155,16 @@
     </section>
 
     <section class="panel">
+      <h2>Add a device</h2>
+      <div class="sub" style="margin-bottom:10px">Scan with the iPad or iPhone camera, open in Safari, then tap <b>Talk here</b>.</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap">
+        <div><div id="qrGo" class="qr"></div><div class="sub qrcap">Same Wi-Fi / hotspot as the board<br><a id="goLink" style="color:inherit"></a></div></div>
+        <div><div id="qrTunnel" class="qr"></div><div class="sub qrcap">From anywhere (changes when the board restarts)<br><a id="tunnelLink" style="color:inherit"></a></div></div>
+      </div>
+      <div class="meta" id="devicesLine" style="margin-top:10px"></div>
+    </section>
+
+    <section class="panel">
       <h2>Add a phrase</h2>
       <form id="phraseForm">
         <input id="phraseText" maxlength="40" autocomplete="off" placeholder="e.g. Please open the window">
@@ -170,6 +183,7 @@
   </div>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 let ws = null, userName = "them", caregiver = "", alertOn = null;
@@ -187,6 +201,9 @@ function setHealth(h) {
     if (k === "sensor" && v.ok === false) el.querySelector(".dot").className = "dot bad";
     el.title = v.ok === true ? (k === "phone" && v.rtt != null ? `connected · round-trip ${v.rtt} ms` : "OK") : (v.err || "unknown");
   }
+  const ph = h.phone || {};
+  if ($("devicesLine")) $("devicesLine").textContent = (ph.devices && ph.devices.length ? `Connected: ${ph.devices.join(", ")}` : "No talking screen connected") +
+    (ph.active ? ` · Talking on: ${ph.active}` : " · No device is talking");
   setTunnel(h.tunnel);
 }
 function setTunnel(t) {
@@ -375,6 +392,24 @@ function drawChart() {
   requestAnimationFrame(drawChart);
 }
 requestAnimationFrame(drawChart);
+
+// ------------------------------------------------------------------ add a device (QR codes)
+let qrShown = {};
+async function loadLinks() {
+  try {
+    const l = await (await fetch("/links")).json();
+    const show = (el, link, url) => {
+      $(link).textContent = url || "starting…"; $(link).href = url || "#";
+      if (!url || qrShown[el] === url) return;
+      qrShown[el] = url; $(el).innerHTML = "";
+      if (window.QRCode) new QRCode($(el), { text: url, width: 144, height: 144, correctLevel: QRCode.CorrectLevel.M });
+      else $(el).textContent = "QR library unavailable (offline)";
+    };
+    show("qrGo", "goLink", l.go);
+    show("qrTunnel", "tunnelLink", l.tunnel);
+  } catch (e) {}
+}
+loadLinks(); setInterval(loadLinks, 15000);
 
 // ------------------------------------------------------------------ websocket
 function connect() {

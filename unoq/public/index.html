@@ -4,9 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Sirenize">
 <meta name="theme-color" content="#121417">
-<title>SOMEBODY</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>Sirenize</title>
 <style>
   /* ------------------------------------------------------------ tokens */
   :root {
@@ -148,15 +152,43 @@
     *, *::before { transition: none !important; animation: none !important; }
     .tile.hi { transform: none; }
   }
+  /* ------------------------------------------------------------ multi-device */
+  #deviceBar { display: none; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px;
+    background: var(--surface); border: 1px solid var(--line); font-size: 15px; color: var(--muted); flex: none; }
+  #deviceBar.show { display: flex; }
+  #deviceBar b { color: var(--text); }
+  #deviceBar .spacer { flex: 1; }
+  #talkHere, #voiceBtn { border: 0; border-radius: 10px; padding: 10px 16px; font: 700 15px inherit; font-family: inherit;
+    background: var(--accent); color: var(--accent-text); }
+  body.mirror #grid, body.mirror #sugg { opacity: .92; }
+
+  /* ------------------------------------------------------------ iPad / large screens */
+  @media (min-width: 700px) {
+    :root { --fs-tile: 30px; --fs-spoken: 60px; --tile-min: 110px; --gap: 14px; --radius: 18px; }
+    :root[data-size="large"]  { --fs-tile: 34px; --fs-spoken: 66px; }
+    :root[data-size="xlarge"] { --fs-tile: 40px; --fs-spoken: 72px; }
+    body { padding: max(18px, env(safe-area-inset-top)) 22px max(10px, env(safe-area-inset-bottom)); gap: 12px; }
+    #grid { grid-template-columns: repeat(4, 1fr); grid-auto-rows: minmax(var(--tile-min), 200px); align-content: start; }
+    #grid .tile { font-size: var(--fs-tile); }
+    #sugg { grid-template-columns: repeat(4, 1fr); }
+    #spoken { height: calc(56px * 1.08 * 2); }
+    .label { font-size: 15px; }
+    #status { font-size: 14px; }
+    #cam { width: 56px; height: 42px; }
+  }
+  @media (min-width: 700px) and (max-height: 820px) { :root { --tile-min: 92px; } }
 </style>
 </head>
 <body>
 <div id="start">
-  <h1>SOMEBODY</h1>
+  <h1>Sirenize</h1>
   <p>Tilt left or right to move. Nod to speak.</p>
-  <button id="startBtn">Begin</button>
-  <p style="font-size:14px">Turns on the voice and the camera.</p>
+  <button id="startBtn">Talk here</button>
+  <p style="font-size:14px">Turns on the voice and the camera on this device.</p>
 </div>
+
+<div id="deviceBar"><span id="deviceText"></span><span class="spacer"></span>
+  <button id="voiceBtn" hidden>Turn on voice</button><button id="talkHere">Talk here</button></div>
 
 <section id="spokenBar" aria-live="polite">
   <div class="label" id="spokenLabel">Spoken</div>
@@ -195,7 +227,7 @@
       <button data-v="on">On</button><button data-v="off">Off</button></span></div>
     <div class="row">Camera suggestions <span class="seg" data-key="camera">
       <button data-v="on">On</button><button data-v="off">Off</button></span></div>
-    <div class="row">Suggested row <span class="seg" data-key="row">
+    <div class="row">Suggested row (all devices) <span class="seg" data-key="row">
       <button data-v="show">Show</button><button data-v="hide">Hide</button></span></div>
     <button class="sheetBtn" id="homeBtn">Reset highlight to start</button>
     <button class="sheetBtn" id="closeSettings">Close</button>
@@ -204,89 +236,79 @@
 </div>
 
 <script>
+// ==================================================================== Sirenize talking screen
+// The server owns the state (highlight, Suggested row, question, last spoken phrase, active
+// device). Every screen just renders it. Only the ACTIVE device speaks and runs the camera.
+
 // ------------------------------------------------------------------ config
-// Fixed grid: never reorder. "I need help" is always first in the grid's scan order.
-const FIXED = [
-  { text: "I need help",  cat: "help" },
-  { text: "I need water", cat: "care" },
-  { text: "Bathroom",     cat: "care" },
-  { text: "I'm in pain",  cat: "care" },
-  { text: "Yes",          cat: "neutral" },
-  { text: "No",           cat: "neutral" },
-  { text: "Thank you",    cat: "social" },
-];
-const IDLE_BEFORE_SWAP_MS = 3000;   // never swap suggestions within 3 s of a tilt
 const MIN_SEND_MS = 4000, MAX_SEND_MS = 20000, DIFF_THRESHOLD = 12;
-const MIN_CONFIDENCE = 0.4;
 const SPOKEN_FADE_MS = 10000;
-// TODO(/tts): set to true once server.py has GET /tts?text=... (ElevenLabs, Test 4).
-// Then suggestions are prefetched into audio blobs and NOD plays them instantly.
+// TODO(/tts): set to true once server.py has GET /tts?text=... (ElevenLabs). Then the active device
+// prefetches suggestion audio into blobs and a NOD plays them instantly.
 const TTS_ENABLED = false;
 
-// ------------------------------------------------------------------ settings (localStorage, guarded)
-const DEFAULTS = { size: "normal", theme: "dark", voice: "on", camera: "on", row: "show" };
-let settings = { ...DEFAULTS };
-try { Object.assign(settings, JSON.parse(localStorage.getItem("somebody.settings") || "{}")); } catch (e) {}
-function saveSettings() { try { localStorage.setItem("somebody.settings", JSON.stringify(settings)); } catch (e) {} }
+// ------------------------------------------------------------------ local settings + device id
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+};
+const DEFAULTS = { size: "normal", theme: "dark", voice: "on", camera: "on" };
+const settings = { ...DEFAULTS, ...store.get("sirenize.settings", {}) };
+function saveSettings() { store.set("sirenize.settings", settings); }
+
+function deviceName() {
+  const ua = navigator.userAgent;
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "iPad";
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? "Android phone" : "Android tablet";
+  return "Computer";
+}
+let deviceId = store.get("sirenize.device", null);
+if (!deviceId) {
+  deviceId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now());
+  store.set("sirenize.device", deviceId);
+}
+const DEVICE_NAME = deviceName();
 
 // ------------------------------------------------------------------ state
 const $ = (id) => document.getElementById(id);
-const counts = { LEFT: 0, RIGHT: 0, NOD: 0 };
-let mode = "camera";            // "camera" | "offline" (no frames) | "hidden" (fixed grid only)
-let current = -1;               // -1 = start (nothing highlighted); RIGHT -> first tile in scan order
-let suggestions = { phrases: [], source: "offline" };
-let pendingSugg = null;
-let lastTiltAt = 0, movesSinceSelect = 0, firstMoveAt = null;
-let recent = [];
-let rtt = null, ws = null, pingN = 0, mega = true;
-let camReady = false, camFailed = false, inFlight = false, lastSentAt = 0, lastThumb = null;
-let failCount = 0, backoffUntil = 0, lastPredictMs = null;
-let voiceUnlocked = false, currentAudio = null, spokenTimer = null, pendingSpoken = null;
-let question = null, pendingQuestion = null, questionTimer = null;   // caregiver's question
-const QUESTION_IDLE_MS = 1000, QUESTION_TIMEOUT_MS = 3 * 60 * 1000;
-const gridItems = FIXED.slice();   // fixed phrases + custom ones appended at the end (never reordered)
+let S = null;                    // last STATE from the server
+let ws = null, rtt = null, pingN = 0;
 const pings = {};
+let audioUnlocked = false, currentAudio = null;
+let camReady = false, camFailed = false, camStream = null, inFlight = false, lastSentAt = 0, lastThumb = null;
+let failCount = 0, backoffUntil = 0, lastPredictMs = null;
+let spokenSeqShown = -1, spokenTimer = null, lastQuestionId = null, wakeLock = null;
 const audioCache = new Map();
 
-function modeFromSettings() {
-  return settings.row === "hide" ? "hidden" : settings.camera === "on" ? "camera" : "offline";
-}
+const isActive = () => !!(S && S.active && S.active.id === deviceId);
+const rowVisible = () => !!(S && (S.question || !S.row_hidden));
 
 // ------------------------------------------------------------------ tiles
 const suggTiles = [0, 1, 2, 3].map(() => {
   const el = document.createElement("div"); el.className = "tile"; $("sugg").appendChild(el); return el;
 });
-function makeGridTile(p) {
-  const el = document.createElement("div");
-  el.className = "tile"; el.textContent = p.text; el.dataset.cat = p.cat;
-  $("grid").appendChild(el); return el;
-}
-const fixedTiles = FIXED.map(makeGridTile);
+let gridTiles = [], gridKey = "";
 
-// Custom phrases from the caregiver dashboard: append new ones at the end, max 12 tiles total.
-function syncCustomPhrases(list) {
-  (list || []).forEach((p) => {
-    if (gridItems.length >= 12 || gridItems.some((g) => g.text.toLowerCase() === String(p.text).toLowerCase())) return;
-    const item = { text: String(p.text), cat: p.category || "neutral" };
-    gridItems.push(item);
-    fixedTiles.push(makeGridTile(item));
+function syncGrid(grid) {
+  const key = grid.map((g) => g.text + "|" + g.cat).join("\n");
+  if (key === gridKey) return;
+  gridKey = key;
+  $("grid").innerHTML = "";
+  gridTiles = grid.map((g) => {
+    const el = document.createElement("div");
+    el.className = "tile"; el.textContent = g.text; el.dataset.cat = g.cat;
+    $("grid").appendChild(el); return el;
   });
-  $("grid").classList.toggle("dense", gridItems.length > 9);
-  render();
+  $("grid").classList.toggle("dense", grid.length > 9 && innerWidth < 700);
 }
 
-// Scan order: suggestions first (unless hidden), then the fixed grid.
-function scanOrder() {
-  const fixed = fixedTiles.map((el, i) => ({ el, phrase: gridItems[i].text, source: "fixed", cancel: !!gridItems[i].cancel }));
-  if (question) return suggTiles.map((el, i) => ({ el, phrase: question.options[i] || "", source: "answer" })).concat(fixed);
-  if (mode === "hidden") return fixed;
-  const sugg = suggTiles.map((el, i) => ({ el, phrase: suggestions.phrases[i] || "", source: "suggested" }));
-  return sugg.concat(fixed);
-}
+// Scan order elements, identical to the server's scan_order(): [4 row tiles if visible] + grid.
+function orderEls() { return (rowVisible() ? suggTiles : []).concat(gridTiles); }
 
 // Tile text: max 2 lines, never truncated. Shrink only when needed, never below 22px.
 function fitTile(el) {
-  const key = el.textContent + "|" + settings.size + "|" + innerWidth;
+  const key = el.textContent + "|" + settings.size + "|" + innerWidth + "|" + innerHeight;
   if (el.dataset.fit === key) return;
   el.dataset.fit = key;
   el.style.fontSize = "";
@@ -297,81 +319,94 @@ function fitTile(el) {
 }
 function textLines(el) {
   const r = document.createRange(); r.selectNodeContents(el);
-  const rects = [...r.getClientRects()];
-  return new Set(rects.map((x) => Math.round(x.top))).size;
+  return new Set([...r.getClientRects()].map((x) => Math.round(x.top))).size;
 }
 
+function fitSpoken() {
+  const el = $("spoken");
+  el.style.fontSize = "";
+  let size = parseFloat(getComputedStyle(el).fontSize);
+  while (el.scrollHeight > el.clientHeight + 1 && size > 40) { size -= 2; el.style.fontSize = size + "px"; }
+}
+
+// ------------------------------------------------------------------ render from server state
 function render() {
-  const order = scanOrder();
-  const rowPhrases = question ? question.options : suggestions.phrases;
-  suggTiles.forEach((el, i) => { el.textContent = rowPhrases[i] || ""; });
-  [...suggTiles, ...fixedTiles].forEach(fitTile);
-  [...suggTiles, ...fixedTiles].forEach((el) => el.classList.remove("hi"));
-  if (current >= 0 && order[current]) order[current].el.classList.add("hi");
-  $("suggSection").classList.toggle("hidden", mode === "hidden" && !question);
-  $("suggSection").classList.toggle("offline", !question && suggestions.source !== "camera");
-  $("suggSection").classList.toggle("asking", !!question);
-  $("suggLabel").textContent = question ? "Your answer" : "Suggested";
-  $("spokenBar").classList.toggle("asking", !!question);
+  if (!S) return;
+  syncGrid(S.grid);
+  const q = S.question;
+  const row = q ? q.options : S.suggestions.phrases;
+  suggTiles.forEach((el, i) => { el.textContent = (row && row[i]) || ""; });
+  [...suggTiles, ...gridTiles].forEach(fitTile);
+  [...suggTiles, ...gridTiles].forEach((el) => el.classList.remove("hi"));
+  const els = orderEls();
+  if (S.highlight >= 0 && els[S.highlight]) els[S.highlight].classList.add("hi");
+
+  $("suggSection").classList.toggle("hidden", !rowVisible());
+  $("suggSection").classList.toggle("offline", !q && S.suggestions.source !== "camera");
+  $("suggSection").classList.toggle("asking", !!q);
+  $("suggLabel").textContent = q ? "Your answer" : "Suggested";
+  $("spokenBar").classList.toggle("asking", !!q);
+  $("seeing").textContent = q ? "" : (S.suggestions.source === "camera" && S.suggestions.scene ? `Seeing: ${S.suggestions.scene}` : "");
+
+  renderSpoken();
+  renderDevice();
   renderStatus();
+
+  // Tell the server the question is on screen (latency measurement), once, from the active device.
+  if (q && q.id !== lastQuestionId) { lastQuestionId = q.id; if (isActive()) wsSend({ type: "SHOWN", id: q.id }); }
+  if (!q) lastQuestionId = null;
+}
+
+function renderSpoken() {
+  const sp = S.spoken, el = $("spoken");
+  $("spokenBar").classList.toggle("message", !!sp && sp.kind === "message");
+  if (!sp) { el.className = "empty"; el.textContent = "Nothing yet"; $("spokenLabel").textContent = "Spoken"; return; }
+  $("spokenLabel").textContent = sp.kind === "question" ? `${sp.asker || "Someone"} asks`
+    : sp.kind === "message" ? "Message" : "Spoken";
+  const key = sp.seq + "|" + sp.kind + "|" + sp.text;
+  if (key === spokenSeqShown) return;
+  spokenSeqShown = key;
+  el.className = ""; el.textContent = sp.text; fitSpoken();
+  clearTimeout(spokenTimer);
+  if (sp.kind !== "question") spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
+}
+
+function renderDevice() {
+  const a = S.active || {};
+  const bar = $("deviceBar");
+  document.body.classList.toggle("mirror", !isActive());
+  if (isActive()) {
+    bar.classList.toggle("show", !audioUnlocked);
+    $("deviceText").innerHTML = "<b>Talking on this device</b> · tap to turn on the voice";
+    $("talkHere").hidden = true; $("voiceBtn").hidden = false;
+  } else {
+    bar.classList.add("show");
+    $("deviceText").innerHTML = a.id ? `Active on <b>${escapeHtml(a.name || "another device")}</b>` : "No device is talking yet";
+    $("talkHere").hidden = false; $("voiceBtn").hidden = true;
+  }
 }
 
 function renderStatus() {
   const open = ws && ws.readyState === WebSocket.OPEN;
+  const mega = S ? S.mega : true;
   $("connDot").className = "dot " + (!open ? "bad" : mega ? "ok" : "warn");
   $("connText").textContent = !open ? "Reconnecting" : mega ? "Connected" : "Headband not responding";
-  const camOn = mode === "camera" && camReady;
+  const camOn = isActive() && settings.camera === "on" && camReady;
   $("camDot").className = "dot " + (inFlight ? "sending" : camOn ? "ok" : "");
-  $("camText").textContent = mode !== "camera" ? "Camera off" : camFailed ? "No camera" : inFlight ? "Looking" : "Camera";
+  $("camText").textContent = !isActive() ? "Camera (other device)" : settings.camera !== "on" ? "Camera off"
+    : camFailed ? "No camera" : inFlight ? "Looking" : camReady ? "Camera" : "Camera off";
   const voiceOn = settings.voice === "on";
-  $("voiceDot").className = "dot " + (voiceOn && voiceUnlocked ? "ok" : "");
-  $("voiceText").textContent = !voiceOn ? "Voice off" : voiceUnlocked ? "Voice ready" : "Voice";
-  $("debug").textContent = `L ${counts.LEFT} · R ${counts.RIGHT} · N ${counts.NOD} · rtt ${rtt ?? "–"} ms` +
-    ` · gemini ${lastPredictMs ?? "–"} ms · fails ${failCount} · mode ${mode}`;
+  $("voiceDot").className = "dot " + (isActive() && voiceOn && audioUnlocked ? "ok" : "");
+  $("voiceText").textContent = !isActive() ? "Silent (mirror)" : !voiceOn ? "Voice off" : audioUnlocked ? "Voice ready" : "Voice: tap to enable";
+  $("debug").textContent = `${DEVICE_NAME} · ${deviceId.slice(0, 6)} · ${isActive() ? "ACTIVE" : "mirror"} · rtt ${rtt ?? "–"} ms` +
+    ` · gemini ${lastPredictMs ?? "–"} ms · fails ${failCount}`;
 }
 
-// ------------------------------------------------------------------ offline suggestions
-function offlinePhrases() {
-  const d = new Date(), m = d.getHours() * 60 + d.getMinutes();
-  const out = [];
-  if (m >= 5 * 60 && m < 12 * 60) out.push("Good morning");
-  if ((m >= 11 * 60 + 30 && m <= 13 * 60 + 30) || (m >= 17 * 60 + 30 && m <= 19 * 60 + 30)) out.push("I'm hungry");
-  if (m >= 21 * 60 || m < 5 * 60) out.push("I'm tired");
-  recent.slice(0, 2).forEach((p) => out.push(p));
-  ["Can you help me?", "Please come here", "I'm cold", "Please wait"].forEach((p) => out.push(p));
-  return [...new Set(out)].slice(0, 4);
-}
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function offerSuggestions(s) {
-  // Always 4 tiles: fill gaps (e.g. phrases dropped for duplicating the fixed grid) with offline ones.
-  const seen = new Set(s.phrases.map((p) => p.toLowerCase()));
-  const fill = offlinePhrases().filter((p) => !seen.has(p.toLowerCase()));
-  const incoming = [...s.phrases, ...fill].slice(0, 4);
-  // Stable slots: a phrase that is still suggested stays in its tile; new ones fill the freed tiles.
-  const keep = suggestions.phrases.map((p) => (incoming.some((q) => q.toLowerCase() === p.toLowerCase()) ? p : null));
-  const fresh = incoming.filter((q) => !keep.some((p) => p && p.toLowerCase() === q.toLowerCase()));
-  const merged = keep.map((p) => p || fresh.shift() || "").concat(fresh).slice(0, 4);
-  if (merged.join("|") === suggestions.phrases.join("|") && s.source === suggestions.source) { pendingSugg = null; return; }
-  pendingSugg = { ...s, phrases: merged };
-  tryApplySuggestions();
-}
-
-function tryApplySuggestions() {
-  if (!pendingSugg) return;
-  if (performance.now() - lastTiltAt < IDLE_BEFORE_SWAP_MS) return;  // user is moving: wait
-  suggestions = pendingSugg; pendingSugg = null;
-  prefetchAudio(suggestions.phrases);
-  render();
-}
-setInterval(tryApplySuggestions, 250);
-
-function goOffline() {
-  offerSuggestions({ phrases: offlinePhrases(), source: "offline" });
-}
-
-// ------------------------------------------------------------------ speech
+// ------------------------------------------------------------------ speech (active device only)
 function prefetchAudio(phrases) {
-  if (!TTS_ENABLED) return;
+  if (!TTS_ENABLED || !isActive()) return;
   phrases.forEach((p) => {
     if (!p || audioCache.has(p)) return;
     fetch(`/tts?text=${encodeURIComponent(p)}`).then((r) => r.ok ? r.blob() : null)
@@ -380,7 +415,7 @@ function prefetchAudio(phrases) {
 }
 
 function speak(text) {
-  if (settings.voice !== "on") return;
+  if (!isActive() || settings.voice !== "on" || !audioUnlocked) return;
   // 1) prefetched clip  2) live /tts  3) speechSynthesis
   if (TTS_ENABLED) {
     const src = audioCache.get(text) || `/tts?text=${encodeURIComponent(text)}`;
@@ -409,153 +444,83 @@ function stopSpeech() {
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
 }
 
-function fitSpoken() {
-  const el = $("spoken");
-  el.style.fontSize = "";
-  let size = parseFloat(getComputedStyle(el).fontSize);
-  while (el.scrollHeight > el.clientHeight + 1 && size > 40) { size -= 2; el.style.fontSize = size + "px"; }
+function unlockAudio() {
+  if ("speechSynthesis" in window) { speechSynthesis.speak(new SpeechSynthesisUtterance("")); audioUnlocked = true; }
 }
 
-function showSpoken(text) {
-  const el = $("spoken");
-  clearTimeout(spokenTimer);
-  el.classList.remove("stale", "empty");
-  if (!question) { $("spokenLabel").textContent = "Spoken"; $("spokenBar").classList.remove("message"); }
-  el.textContent = text;
-  fitSpoken();
-  spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
-}
-
-// ------------------------------------------------------------------ gestures
+// ------------------------------------------------------------------ selection feedback
 function pulse(el) {
+  if (!el) return;
   el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse");
   setTimeout(() => el.classList.remove("pulse"), 320);
 }
 
-function select(item, logIt) {
-  if (!item || !item.phrase) return;
-  pulse(item.el);
-  if (item.cancel) {                       // "Never mind": stop speech, clear, back to start
-    stopSpeech();
-    pendingSpoken && clearTimeout(pendingSpoken);
-    setTimeout(() => {
-      showSpoken("Never mind");
-      $("spoken").classList.add("stale");
-      current = -1;
-      render();
-    }, 300);
-    wsSend({ type: "SAID", phrase: "Never mind", source: logIt ? "grid" : "tap" });
-    movesSinceSelect = 0; firstMoveAt = null;
-    return;
-  }
-  if (item.source === "answer" && question) {   // answer to the caregiver's question
-    const q = question;
-    speak(item.phrase);
-    wsSend({ type: "ANSWER", id: q.id, answer: item.phrase });
-    endQuestion();
-    current = -1;
-    setTimeout(() => showSpoken(item.phrase), 300);
-    if (item.phrase !== "Something else") recent = [item.phrase, ...recent.filter((p) => p !== item.phrase)].slice(0, 5);
-    movesSinceSelect = 0; firstMoveAt = null;
-    render();
-    return;
-  }
-  speak(item.phrase);
-  pendingSpoken = setTimeout(() => showSpoken(item.phrase), 300);
-  recent = [item.phrase, ...recent.filter((p) => p !== item.phrase)].slice(0, 5);
-  wsSend({ type: "SAID", phrase: item.phrase, source: !logIt ? "tap" : item.source === "fixed" ? "grid" : "suggested" });
-  if (logIt) {
-    fetch("/log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-      phrase: item.phrase, source: item.source, moves_since_last_select: movesSinceSelect,
-      ms_since_first_move: firstMoveAt ? Math.round(performance.now() - firstMoveAt) : 0,
-    }) }).catch(() => {});
-  }
-  movesSinceSelect = 0; firstMoveAt = null;
+function onSelect(m) {
+  pulse(orderEls()[m.index]);
+  speak(m.text);
 }
 
-// ------------------------------------------------------------------ caregiver questions
+// ------------------------------------------------------------------ input
 function wsSend(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
 
-function offerQuestion(m) { pendingQuestion = m; tryApplyQuestion(); }
-
-function tryApplyQuestion() {
-  if (!pendingQuestion) return;
-  if (performance.now() - lastTiltAt < QUESTION_IDLE_MS) return;   // user is moving: wait for a pause
-  question = pendingQuestion; pendingQuestion = null;
-  clearTimeout(questionTimer);
-  const id = question.id;
-  questionTimer = setTimeout(() => {           // unanswered after 3 min: clear quietly
-    if (question && question.id === id) { wsSend({ type: "EXPIRED", id }); endQuestion(); render(); }
-  }, QUESTION_TIMEOUT_MS);
-  clearTimeout(spokenTimer);
-  $("spokenLabel").textContent = (question.asker ? question.asker : "Someone") + " asks";
-  $("spoken").classList.remove("stale", "empty");
-  $("spoken").textContent = question.question;
-  fitSpoken();
-  current = 0;                                 // highlight the first answer
-  movesSinceSelect = 0; firstMoveAt = null;
-  render();
-  wsSend({ type: "SHOWN", id });
-}
-setInterval(tryApplyQuestion, 200);
-
-function endQuestion() {
-  clearTimeout(questionTimer);
-  question = null;
-  $("spokenLabel").textContent = "Spoken";
-  $("spoken").classList.add("stale");
-}
-
-function showMessage(text) {                   // e.g. "Sam is coming"
-  speak(text);
-  $("spokenBar").classList.add("message");
-  $("spokenLabel").textContent = "Message";
-  const el = $("spoken");
-  clearTimeout(spokenTimer);
-  el.classList.remove("stale", "empty");
-  el.textContent = text;
-  fitSpoken();
-  spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
-}
-
-function goHome() { current = -1; movesSinceSelect = 0; firstMoveAt = null; render(); }
-
-function handle(type) {
-  if (type === "HOME") return goHome();
-  if (!(type in counts)) return;
-  counts[type]++;
-  const order = scanOrder(), n = order.length;
-  if (type === "LEFT" || type === "RIGHT") {
-    lastTiltAt = performance.now();
-    if (firstMoveAt === null) firstMoveAt = lastTiltAt;
-    movesSinceSelect++;
-    if (type === "RIGHT") current = current < 0 ? 0 : (current + 1) % n;
-    else current = current < 0 ? n - 1 : (current - 1 + n) % n;
-  }
-  if (type === "NOD") {
-    lastTiltAt = performance.now();
-    if (current >= 0) select(order[current], true);
-  }
-  render();
-}
-
-// Tap a tile to speak it (touch fallback, not logged as a trial).
 document.addEventListener("click", (e) => {
   const el = e.target.closest(".tile");
   if (!el) return;
-  const item = scanOrder().find((o) => o.el === el);
-  if (item) select(item, false);
+  const i = orderEls().indexOf(el);
+  if (i >= 0 && el.textContent) wsSend({ type: "TAP", index: i });
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowLeft") handle("LEFT");
-  else if (e.key === "ArrowRight") handle("RIGHT");
-  else if (e.key === " ") { e.preventDefault(); handle("NOD"); }
-  else if (e.key === "Home" || e.key === "h") handle("HOME");
+  const g = { ArrowLeft: "LEFT", ArrowRight: "RIGHT", " ": "NOD", Home: "HOME", h: "HOME" }[e.key];
+  if (!g) return;
+  if (e.key === " ") e.preventDefault();
+  wsSend({ type: "INPUT", gesture: g });
 });
 
-// No pinch-zoom on iOS (double-tap zoom is already off via touch-action: manipulation).
 ["gesturestart", "gesturechange"].forEach((t) => document.addEventListener(t, (e) => e.preventDefault()));
+
+// ------------------------------------------------------------------ active device
+function claim(force) {
+  wsSend({ type: "CLAIM", force, tz: -new Date().getTimezoneOffset() });
+}
+
+async function talkHere() {             // user tap: unlocks iOS audio, claims, starts camera
+  unlockAudio();
+  $("start").style.display = "none";
+  claim(true);
+  await startCamera();
+  requestWakeLock();
+  renderDevice(); renderStatus();
+}
+$("startBtn").addEventListener("click", (e) => { e.stopPropagation(); talkHere(); });
+$("talkHere").addEventListener("click", (e) => { e.stopPropagation(); talkHere(); });
+$("voiceBtn").addEventListener("click", (e) => { e.stopPropagation(); talkHere(); });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { claim(false); requestWakeLock(); }
+});
+
+let wasActive = false;
+function onActiveChange() {
+  const now = isActive();
+  if (now === wasActive) return;
+  wasActive = now;
+  if (now) {
+    $("start").style.display = "none";
+    if (audioUnlocked) { startCamera(); requestWakeLock(); }
+    prefetchAudio(S.suggestions.phrases);
+  } else {
+    stopSpeech();                         // the old device goes quiet immediately
+    stopCamera();
+    releaseWakeLock();
+  }
+}
+
+async function requestWakeLock() {
+  if (!isActive() || !("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+}
+function releaseWakeLock() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
 
 // ------------------------------------------------------------------ settings UI
 function applySettings() {
@@ -563,24 +528,22 @@ function applySettings() {
   document.documentElement.dataset.size = settings.size;
   document.querySelector('meta[name="theme-color"]').content = settings.theme === "light" ? "#F4F5F7" : "#121417";
   document.querySelectorAll(".seg").forEach((seg) => {
-    seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(settings[seg.dataset.key] === b.dataset.v)));
+    const key = seg.dataset.key;
+    const val = key === "row" ? (S && S.row_hidden ? "hide" : "show") : settings[key];
+    seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(val === b.dataset.v)));
   });
-  const newMode = modeFromSettings();
-  if (newMode !== mode) {
-    mode = newMode;
-    current = -1;
-    if (mode !== "camera") { $("seeing").textContent = ""; goOffline(); }
-    else { lastSentAt = 0; lastThumb = null; failCount = 0; backoffUntil = 0; }
-  }
   if (settings.voice !== "on") stopSpeech();
-  if (!$("spoken").classList.contains("empty")) fitSpoken();
+  if (settings.camera !== "on") stopCamera(); else if (isActive() && audioUnlocked) startCamera();
   render();
 }
 
 document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", (e) => {
   e.stopPropagation();
-  settings[b.parentElement.dataset.key] = b.dataset.v;
+  const key = b.parentElement.dataset.key;
+  if (key === "row") { wsSend({ type: "ROW", hidden: b.dataset.v === "hide" }); return; }
+  settings[key] = b.dataset.v;
   saveSettings();
+  if (key === "camera" && isActive()) wsSend({ type: "CAMERA", on: settings.camera === "on" });
   applySettings();
 }));
 
@@ -588,33 +551,37 @@ let taps = [];
 $("status").addEventListener("click", () => {
   const now = Date.now();
   taps = taps.filter((t) => now - t < 700).concat(now);
-  if (taps.length >= 3) { taps = []; $("settings").classList.add("open"); renderStatus(); }
+  if (taps.length >= 3) { taps = []; applySettings(); $("settings").classList.add("open"); }
 });
 $("closeSettings").addEventListener("click", () => $("settings").classList.remove("open"));
 $("settings").addEventListener("click", (e) => { if (e.target.id === "settings") $("settings").classList.remove("open"); });
-$("homeBtn").addEventListener("click", (e) => { e.stopPropagation(); goHome(); $("settings").classList.remove("open"); });
+$("homeBtn").addEventListener("click", (e) => { e.stopPropagation(); wsSend({ type: "INPUT", gesture: "HOME" }); $("settings").classList.remove("open"); });
 
 // ------------------------------------------------------------------ websocket
-function setPill() { renderStatus(); }
-
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = setPill;
+  ws = new WebSocket(`${proto}://${location.host}/ws?device=${encodeURIComponent(deviceId)}&name=${encodeURIComponent(DEVICE_NAME)}`);
+  ws.onopen = () => { renderStatus(); if (document.visibilityState === "visible") claim(false); };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
-    if ("mega" in m) { mega = m.mega; setPill(); }
+    if (m.type === "STATE") {
+      const prevPhrases = S ? S.suggestions.phrases.join("|") : "";
+      S = m;
+      onActiveChange();
+      if (S.suggestions.phrases.join("|") !== prevPhrases) prefetchAudio(S.suggestions.phrases);
+      if (!isActive() && S.active && S.active.id) $("start").style.display = "none";
+      applySettings();
+    } else if (m.type === "SELECT") onSelect(m);
+    else if (m.type === "SAY") speak(m.text);
+    else if ("mega" in m && S) { S.mega = m.mega; renderStatus(); }
     else if ("pong" in m && pings[m.pong]) {
       rtt = Math.round(performance.now() - pings[m.pong]);
       delete pings[m.pong];
       ws.send(JSON.stringify({ rtt }));
       renderStatus();
-    } else if (m.type === "QUESTION") offerQuestion(m);
-    else if (m.type === "SAY") showMessage(m.text);
-    else if (m.type === "PHRASES") syncCustomPhrases(m.phrases);
-    else if (m.type) handle(m.type);
+    }
   };
-  ws.onclose = () => { setPill(); setTimeout(connect, 1000); };
+  ws.onclose = () => { renderStatus(); setTimeout(connect, 1000); };
   ws.onerror = () => ws.close();
 }
 
@@ -625,11 +592,39 @@ setInterval(() => {
   }
 }, 2000);
 
-// ------------------------------------------------------------------ camera -> Gemini
+// ------------------------------------------------------------------ camera -> Gemini (active device only)
 const video = $("cam");
 const thumbCanvas = Object.assign(document.createElement("canvas"), { width: 16, height: 16 });
 const thumbCtx = thumbCanvas.getContext("2d", { willReadFrequently: true });
 const frameCanvas = document.createElement("canvas");
+
+async function startCamera() {
+  if (camStream || settings.camera !== "on" || !isActiveOrClaiming()) return;
+  try {
+    if (!navigator.mediaDevices) throw new Error("camera needs HTTPS");
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+    video.srcObject = camStream; video.style.display = "";
+    camReady = true; camFailed = false;
+  } catch (err) {
+    console.warn("Camera:", err);
+    camFailed = true; camReady = false;
+    video.style.display = "none";
+  }
+  renderStatus();
+}
+// talkHere() starts the camera right after claiming, before the server's reply arrives.
+let claimingUntil = 0;
+const isActiveOrClaiming = () => isActive() || performance.now() < claimingUntil;
+$("startBtn").addEventListener("pointerdown", () => { claimingUntil = performance.now() + 3000; });
+$("talkHere").addEventListener("pointerdown", () => { claimingUntil = performance.now() + 3000; });
+$("voiceBtn").addEventListener("pointerdown", () => { claimingUntil = performance.now() + 3000; });
+
+function stopCamera() {
+  if (camStream) camStream.getTracks().forEach((t) => t.stop());
+  camStream = null; camReady = false; video.srcObject = null;
+  lastThumb = null;
+  renderStatus();
+}
 
 function grabThumb() {
   thumbCtx.drawImage(video, 0, 0, 16, 16);
@@ -637,12 +632,7 @@ function grabThumb() {
   for (let i = 0; i < 256; i++) g[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
   return g;
 }
-
-function diff(a, b) {
-  let s = 0;
-  for (let i = 0; i < 256; i++) s += Math.abs(a[i] - b[i]);
-  return s / 256;
-}
+function diff(a, b) { let s = 0; for (let i = 0; i < 256; i++) s += Math.abs(a[i] - b[i]); return s / 256; }
 
 function grabJpegB64() {
   const w = video.videoWidth, h = video.videoHeight, k = 512 / Math.max(w, h);
@@ -661,8 +651,8 @@ async function sendFrame(thumb) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 6000);
     const r = await fetch("/predict", {
-      method: "POST", headers: { "Content-Type": "application/json" }, signal: ctrl.signal,
-      body: JSON.stringify({ image_b64: grabJpegB64(), recent,
+      method: "POST", headers: { "Content-Type": "application/json", "X-Device": deviceId }, signal: ctrl.signal,
+      body: JSON.stringify({ image_b64: grabJpegB64(), recent: [],
         local_time: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}` }),
     });
     clearTimeout(t);
@@ -672,25 +662,17 @@ async function sendFrame(thumb) {
   } finally {
     inFlight = false;
   }
-  if (mode !== "camera") { renderStatus(); return; }  // toggled off while the request was in flight
-  if (res.ok) {
-    failCount = 0; backoffUntil = 0; lastPredictMs = res.ms;
-    const unsure = res.confidence < MIN_CONFIDENCE;
-    $("seeing").textContent = unsure ? "Not sure what's in view. Keeping suggestions." : `Seeing: ${res.scene}`;
-    if (!unsure) offerSuggestions({ phrases: res.phrases, source: "camera" });
-    else if (suggestions.phrases.length === 0) goOffline();
-  } else {
+  // The server applies good results to the shared Suggested row; here we only manage back-off.
+  if (res.ok) { failCount = 0; backoffUntil = 0; lastPredictMs = res.ms; }
+  else if (res.reason !== "not the active device") {
     failCount++;
     backoffUntil = performance.now() + Math.min(4000 * 2 ** (failCount - 1), 30000);
-    $("seeing").textContent = "Using everyday suggestions";
-    console.warn("predict failed:", res.reason);
-    goOffline();
   }
-  render();
+  renderStatus();
 }
 
 setInterval(() => {
-  if (mode !== "camera" || !camReady || inFlight || video.readyState < 2) return;
+  if (!isActive() || settings.camera !== "on" || !camReady || inFlight || video.readyState < 2) return;
   const now = performance.now();
   if (now < backoffUntil) return;
   const since = now - lastSentAt;
@@ -700,28 +682,7 @@ setInterval(() => {
 }, 500);
 
 // ------------------------------------------------------------------ start
-$("startBtn").addEventListener("click", async (e) => {
-  e.stopPropagation();
-  // iOS: speech only works after it is triggered once from a tap.
-  if ("speechSynthesis" in window) { speechSynthesis.speak(new SpeechSynthesisUtterance("")); voiceUnlocked = true; }
-  $("start").remove();
-  renderStatus();
-  try {
-    if (!navigator.mediaDevices) throw new Error("camera needs HTTPS");
-    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-    camReady = true;
-  } catch (err) {
-    console.warn("Camera:", err);
-    camFailed = true;
-    video.style.display = "none";
-    $("seeing").textContent = "Camera unavailable. Using everyday suggestions.";
-  }
-  renderStatus();
-});
-
-addEventListener("resize", () => { render(); if (!$("spoken").classList.contains("empty")) fitSpoken(); });
-mode = modeFromSettings();
-suggestions = { phrases: offlinePhrases(), source: "offline" };
+addEventListener("resize", () => { gridKey = ""; render(); });
 applySettings();
 connect();
 </script>

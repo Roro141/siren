@@ -120,7 +120,9 @@
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
   .dot.sending { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 35%, transparent); }
   #status .spacer { flex: 1; }
-  #cam { width: 36px; height: 27px; object-fit: cover; border-radius: 5px; background: #000; opacity: .75; flex: none; }
+  #cam { width: 64px; height: 48px; object-fit: cover; border-radius: 6px; background: #000; flex: none; cursor: pointer; }
+  #cam.big { position: fixed; z-index: 25; right: 12px; bottom: 56px; width: min(70vw, 420px); height: auto; aspect-ratio: 4/3;
+    border: 2px solid var(--accent); }
 
   /* ------------------------------------------------------------ settings sheet */
   #settings { position: fixed; inset: 0; z-index: 20; display: none; align-items: flex-end;
@@ -212,6 +214,7 @@
   <span class="stat"><span class="dot" id="connDot"></span><span id="connText">Connecting</span></span>
   <span class="stat"><span class="dot" id="camDot"></span><span id="camText">Camera</span></span>
   <span class="stat"><span class="dot" id="voiceDot"></span><span id="voiceText">Voice</span></span>
+  <span class="stat"><span class="dot" id="micDot"></span><span id="micText">Listening off</span></span>
   <span class="spacer"></span>
   <video id="cam" autoplay playsinline muted></video>
 </footer>
@@ -227,14 +230,24 @@
       <button data-v="on">On</button><button data-v="off">Off</button></span></div>
     <div class="row">Camera suggestions <span class="seg" data-key="camera">
       <button data-v="on">On</button><button data-v="off">Off</button></span></div>
+    <div class="row">Camera <span class="seg" data-key="facing">
+      <button data-v="back">Back</button><button data-v="front">Front</button></span></div>
+    <div class="row">Listen for people talking <span class="seg" data-key="listen">
+      <button data-v="on">On</button><button data-v="off">Off</button></span></div>
     <div class="row">Suggested row (all devices) <span class="seg" data-key="row">
       <button data-v="show">Show</button><button data-v="hide">Hide</button></span></div>
+    <div class="row" style="display:block">Connect another screen
+      <div style="display:flex;gap:16px;align-items:center;margin-top:10px">
+        <div id="qrHere" style="background:#fff;padding:8px;border-radius:8px;width:146px;height:146px"></div>
+        <div style="font-size:14px;color:var(--muted)">Scan with the other iPhone or iPad camera, open it in Safari, then tap <b>Talk here</b> on whichever screen should speak.<br><span id="qrUrl" style="word-break:break-all"></span></div>
+      </div></div>
     <button class="sheetBtn" id="homeBtn">Reset highlight to start</button>
     <button class="sheetBtn" id="closeSettings">Close</button>
     <div id="debug"></div>
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 // ==================================================================== Sirenize talking screen
 // The server owns the state (highlight, Suggested row, question, last spoken phrase, active
@@ -243,16 +256,16 @@
 // ------------------------------------------------------------------ config
 const MIN_SEND_MS = 4000, MAX_SEND_MS = 20000, DIFF_THRESHOLD = 12;
 const SPOKEN_FADE_MS = 10000;
-// TODO(/tts): set to true once server.py has GET /tts?text=... (ElevenLabs). Then the active device
-// prefetches suggestion audio into blobs and a NOD plays them instantly.
-const TTS_ENABLED = false;
+// The user's voice comes from the server's /tts (ElevenLabs, cached on the board). The active device
+// prefetches every visible phrase into memory so a NOD plays instantly, even if the network drops.
+const TTS_ENABLED = true;
 
 // ------------------------------------------------------------------ local settings + device id
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
 };
-const DEFAULTS = { size: "normal", theme: "dark", voice: "on", camera: "on" };
+const DEFAULTS = { size: "normal", theme: "dark", voice: "on", camera: "on", listen: "on", facing: "back" };
 const settings = { ...DEFAULTS, ...store.get("sirenize.settings", {}) };
 function saveSettings() { store.set("sirenize.settings", settings); }
 
@@ -275,7 +288,9 @@ const $ = (id) => document.getElementById(id);
 let S = null;                    // last STATE from the server
 let ws = null, rtt = null, pingN = 0;
 const pings = {};
-let audioUnlocked = false, currentAudio = null;
+let audioUnlocked = false, currentAudio = null, voiceId = null;
+const player = new Audio();             // one element, unlocked by the first tap (iOS rule)
+player.preload = "auto";
 let camReady = false, camFailed = false, camStream = null, inFlight = false, lastSentAt = 0, lastThumb = null;
 let failCount = 0, backoffUntil = 0, lastPredictMs = null;
 let spokenSeqShown = -1, spokenTimer = null, lastQuestionId = null, wakeLock = null;
@@ -344,9 +359,10 @@ function render() {
   $("suggSection").classList.toggle("hidden", !rowVisible());
   $("suggSection").classList.toggle("offline", !q && S.suggestions.source !== "camera");
   $("suggSection").classList.toggle("asking", !!q);
-  $("suggLabel").textContent = q ? "Your answer" : "Suggested";
+  $("suggLabel").textContent = q ? "Your answer" : S.suggestions.source === "heard" ? "Reply" : "Suggested";
   $("spokenBar").classList.toggle("asking", !!q);
-  $("seeing").textContent = q ? "" : (S.suggestions.source === "camera" && S.suggestions.scene ? `Seeing: ${S.suggestions.scene}` : "");
+  $("seeing").textContent = q ? "" : S.suggestions.source === "heard" && S.suggestions.scene ? `Heard: “${S.suggestions.scene}”`
+    : (S.suggestions.source === "camera" && S.suggestions.scene ? `Seeing: ${S.suggestions.scene}` : "");
 
   renderSpoken();
   renderDevice();
@@ -362,13 +378,13 @@ function renderSpoken() {
   $("spokenBar").classList.toggle("message", !!sp && sp.kind === "message");
   if (!sp) { el.className = "empty"; el.textContent = "Nothing yet"; $("spokenLabel").textContent = "Spoken"; return; }
   $("spokenLabel").textContent = sp.kind === "question" ? `${sp.asker || "Someone"} asks`
-    : sp.kind === "message" ? "Message" : "Spoken";
+    : sp.kind === "heard" ? "Someone said" : sp.kind === "message" ? "Message" : "Spoken";
   const key = sp.seq + "|" + sp.kind + "|" + sp.text;
   if (key === spokenSeqShown) return;
   spokenSeqShown = key;
   el.className = ""; el.textContent = sp.text; fitSpoken();
   clearTimeout(spokenTimer);
-  if (sp.kind !== "question") spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
+  if (sp.kind !== "question" && sp.kind !== "heard") spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
 }
 
 function renderDevice() {
@@ -397,7 +413,13 @@ function renderStatus() {
     : camFailed ? "No camera" : inFlight ? "Looking" : camReady ? "Camera" : "Camera off";
   const voiceOn = settings.voice === "on";
   $("voiceDot").className = "dot " + (isActive() && voiceOn && audioUnlocked ? "ok" : "");
-  $("voiceText").textContent = !isActive() ? "Silent (mirror)" : !voiceOn ? "Voice off" : audioUnlocked ? "Voice ready" : "Voice: tap to enable";
+  const vname = S && S.voice ? S.voice.name : "";
+  $("voiceText").textContent = !isActive() ? "Silent (mirror)" : !voiceOn ? "Voice off"
+    : audioUnlocked ? `Voice ready${vname ? " · " + vname : ""}` : "Voice: tap to enable";
+  const micOn = isActive() && settings.listen === "on" && (micStream || micReleased);
+  $("micDot").className = "dot " + (micSending ? "sending" : micOn ? (micPaused ? "" : "ok") : "");
+  $("micText").textContent = !isActive() ? "Listening (other device)" : settings.listen !== "on" ? "Listening off"
+    : micError ? "Mic unavailable" : !micStream ? "Listening off" : micSending ? "Thinking…" : micPaused ? "Listening paused" : "Listening";
   $("debug").textContent = `${DEVICE_NAME} · ${deviceId.slice(0, 6)} · ${isActive() ? "ACTIVE" : "mirror"} · rtt ${rtt ?? "–"} ms` +
     ` · gemini ${lastPredictMs ?? "–"} ms · fails ${failCount}`;
 }
@@ -405,23 +427,45 @@ function renderStatus() {
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // ------------------------------------------------------------------ speech (active device only)
+const ttsUrl = (p) => `/tts?v=${encodeURIComponent(voiceId || "")}&text=${encodeURIComponent(p)}`;
+const cacheKey = (p) => (voiceId || "") + "|" + p;
+
 function prefetchAudio(phrases) {
-  if (!TTS_ENABLED || !isActive()) return;
+  if (!TTS_ENABLED || !isActive() || !S || !S.voice || !S.voice.tts) return;
   phrases.forEach((p) => {
-    if (!p || audioCache.has(p)) return;
-    fetch(`/tts?text=${encodeURIComponent(p)}`).then((r) => r.ok ? r.blob() : null)
-      .then((b) => { if (b) audioCache.set(p, URL.createObjectURL(b)); }).catch(() => {});
+    if (!p || audioCache.has(cacheKey(p))) return;
+    audioCache.set(cacheKey(p), null);            // in flight
+    fetch(ttsUrl(p)).then((r) => r.ok ? r.blob() : null)
+      .then((b) => { if (b) audioCache.set(cacheKey(p), URL.createObjectURL(b)); else audioCache.delete(cacheKey(p)); })
+      .catch(() => audioCache.delete(cacheKey(p)));
   });
+}
+
+function prefetchVisible() {
+  if (!S) return;
+  prefetchAudio([...S.grid.map((g) => g.text), ...S.suggestions.phrases, ...(S.question ? S.question.options : [])]);
+}
+
+function onVoiceChange() {
+  const id = S && S.voice ? S.voice.id : null;
+  if (id === voiceId) return;
+  voiceId = id;
+  audioCache.forEach((u) => { if (u) URL.revokeObjectURL(u); });
+  audioCache.clear();
+  prefetchVisible();
 }
 
 function speak(text) {
   if (!isActive() || settings.voice !== "on" || !audioUnlocked) return;
+  releaseMicWhileSpeaking(Math.min(9000, 1500 + text.length * 90));
   // 1) prefetched clip  2) live /tts  3) speechSynthesis
-  if (TTS_ENABLED) {
-    const src = audioCache.get(text) || `/tts?text=${encodeURIComponent(text)}`;
+  if (TTS_ENABLED && S && S.voice && S.voice.tts) {
+    const src = audioCache.get(cacheKey(text)) || ttsUrl(text);
     stopSpeech();
-    currentAudio = new Audio(src);
-    currentAudio.play().catch(() => speakLocal(text));
+    player.onerror = () => speakLocal(text);    // no network and not cached -> device voice
+    player.src = src;
+    currentAudio = player;
+    player.play().catch(() => speakLocal(text));
     return;
   }
   speakLocal(text);
@@ -431,6 +475,7 @@ function speakLocal(text) {
   if (!("speechSynthesis" in window)) return;
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 0.95;
+  u.onend = () => { clearTimeout(micResumeTimer); micResumeTimer = setTimeout(resumeMicAfterSpeech, 500); };
   if (speechSynthesis.speaking || speechSynthesis.pending) {
     speechSynthesis.cancel();
     setTimeout(() => speechSynthesis.speak(u), 80);   // iOS swallows speak() right after cancel()
@@ -441,11 +486,15 @@ function speakLocal(text) {
 
 function stopSpeech() {
   if ("speechSynthesis" in window) speechSynthesis.cancel();
-  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  if (currentAudio) { currentAudio.pause(); currentAudio.onerror = null; currentAudio = null; }
 }
 
+// A tiny silent WAV, played during the user's tap so iOS lets this page play audio later.
+const SILENT = "data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";   // 0.1 s of real silence
 function unlockAudio() {
-  if ("speechSynthesis" in window) { speechSynthesis.speak(new SpeechSynthesisUtterance("")); audioUnlocked = true; }
+  try { player.src = SILENT; player.play().catch(() => {}); } catch (e) {}
+  if ("speechSynthesis" in window) speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+  audioUnlocked = true;
 }
 
 // ------------------------------------------------------------------ selection feedback
@@ -490,6 +539,7 @@ async function talkHere() {             // user tap: unlocks iOS audio, claims, 
   claim(true);
   await startCamera();
   requestWakeLock();
+  startMic();
   renderDevice(); renderStatus();
 }
 $("startBtn").addEventListener("click", (e) => { e.stopPropagation(); talkHere(); });
@@ -507,11 +557,12 @@ function onActiveChange() {
   wasActive = now;
   if (now) {
     $("start").style.display = "none";
-    if (audioUnlocked) { startCamera(); requestWakeLock(); }
-    prefetchAudio(S.suggestions.phrases);
+    if (audioUnlocked) { startCamera(); requestWakeLock(); startMic(); }
+    prefetchVisible();
   } else {
     stopSpeech();                         // the old device goes quiet immediately
     stopCamera();
+    stopMic();
     releaseWakeLock();
   }
 }
@@ -544,6 +595,8 @@ document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("clic
   settings[key] = b.dataset.v;
   saveSettings();
   if (key === "camera" && isActive()) wsSend({ type: "CAMERA", on: settings.camera === "on" });
+  if (key === "listen") { if (settings.listen === "on") startMic(); else stopMic(); }
+  if (key === "facing" && isActive()) { stopCamera(); startCamera(); }
   applySettings();
 }));
 
@@ -551,7 +604,7 @@ let taps = [];
 $("status").addEventListener("click", () => {
   const now = Date.now();
   taps = taps.filter((t) => now - t < 700).concat(now);
-  if (taps.length >= 3) { taps = []; applySettings(); $("settings").classList.add("open"); }
+  if (taps.length >= 3) { taps = []; applySettings(); showQr(); $("settings").classList.add("open"); }
 });
 $("closeSettings").addEventListener("click", () => $("settings").classList.remove("open"));
 $("settings").addEventListener("click", (e) => { if (e.target.id === "settings") $("settings").classList.remove("open"); });
@@ -568,7 +621,9 @@ function connect() {
       const prevPhrases = S ? S.suggestions.phrases.join("|") : "";
       S = m;
       onActiveChange();
+      onVoiceChange();
       if (S.suggestions.phrases.join("|") !== prevPhrases) prefetchAudio(S.suggestions.phrases);
+      if (S.question) prefetchAudio(S.question.options);
       if (!isActive() && S.active && S.active.id) $("start").style.display = "none";
       applySettings();
     } else if (m.type === "SELECT") onSelect(m);
@@ -602,7 +657,7 @@ async function startCamera() {
   if (camStream || settings.camera !== "on" || !isActiveOrClaiming()) return;
   try {
     if (!navigator.mediaDevices) throw new Error("camera needs HTTPS");
-    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: settings.facing === "front" ? "user" : "environment" }, audio: false });
     video.srcObject = camStream; video.style.display = "";
     camReady = true; camFailed = false;
   } catch (err) {
@@ -680,6 +735,118 @@ setInterval(() => {
   const thumb = grabThumb();
   if (!lastThumb || since >= MAX_SEND_MS || diff(thumb, lastThumb) > DIFF_THRESHOLD) sendFrame(thumb);
 }, 500);
+
+// ------------------------------------------------------------------ listening (active device only)
+// Someone talks to her -> after a 1.2 s pause the clip goes to /hear -> Gemini reply suggestions
+// appear in the Suggested row on every screen. The mic pauses while this device speaks.
+let micStream = null, micCtx = null, micAnalyser = null, micRec = null, micChunks = [], micError = false;
+let micSpeaking = false, micSpeechStart = 0, micLastLoud = 0, micNoise = 0.01, micPaused = false, micSending = false;
+let micPauseUntil = 0;
+const MIC_SILENCE_MS = 1200, MIC_MIN_SPEECH_MS = 500, MIC_MAX_MS = 15000;
+const micMime = () => ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+
+async function startMic() {
+  if (micStream || !isActiveOrClaiming() || settings.listen !== "on" || !window.MediaRecorder) return;
+  try {
+    if (!navigator.mediaDevices) throw new Error("needs HTTPS");
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    micCtx = new (window.AudioContext || window.webkitAudioContext)();
+    micAnalyser = micCtx.createAnalyser(); micAnalyser.fftSize = 1024;
+    micCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+    micError = false;
+    micTick();
+  } catch (e) {
+    console.warn("Mic:", e); micError = true; micStream = null;
+  }
+  renderStatus();
+}
+
+function stopMic() {
+  if (micRec && micRec.state !== "inactive") { micRec.onstop = null; micRec.stop(); }
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  if (micCtx) micCtx.close().catch(() => {});
+  micStream = micCtx = micAnalyser = micRec = null; micSpeaking = false;
+  renderStatus();
+}
+
+// iOS plays audio quietly (call mode) while any page holds the microphone open, so the mic is fully
+// released while her voice plays and reopened ~0.5 s after it ends.
+let micResumeTimer = null, micReleased = false;
+function releaseMicWhileSpeaking(maxMs) {
+  if (micStream) { stopMic(); micReleased = true; }
+  micPaused = micReleased;
+  clearTimeout(micResumeTimer);
+  micResumeTimer = setTimeout(resumeMicAfterSpeech, maxMs);   // safety net if "ended" never fires
+  renderStatus();
+}
+function resumeMicAfterSpeech() {
+  clearTimeout(micResumeTimer);
+  if (!micReleased) return;
+  micReleased = false; micPaused = false;
+  if (isActive() && settings.listen === "on") startMic();
+}
+player.addEventListener("ended", () => { clearTimeout(micResumeTimer); micResumeTimer = setTimeout(resumeMicAfterSpeech, 500); });
+
+function pauseMicFor(ms) {
+  micPauseUntil = performance.now() + ms;
+  if (micSpeaking && micRec && micRec.state !== "inactive") { micRec.onstop = null; micRec.stop(); micSpeaking = false; }
+}
+player.addEventListener("ended", () => { micPauseUntil = performance.now() + 400; });
+
+const micBuf = new Float32Array(1024);
+function micTick() {
+  if (!micStream || !micAnalyser) return;
+  requestAnimationFrame(micTick);
+  const now = performance.now();
+  const paused = now < micPauseUntil || (currentAudio && !currentAudio.paused) || ("speechSynthesis" in window && speechSynthesis.speaking);
+  if (paused !== micPaused) { micPaused = paused; renderStatus(); }
+  if (paused || micSending) return;
+  micAnalyser.getFloatTimeDomainData(micBuf);
+  let sum = 0; for (const v of micBuf) sum += v * v;
+  const rms = Math.sqrt(sum / micBuf.length);
+  if (!micSpeaking) micNoise = micNoise * 0.98 + rms * 0.02;
+  const loud = rms > Math.max(0.02, micNoise * 3);
+  if (loud) {
+    micLastLoud = now;
+    if (!micSpeaking) {
+      micSpeaking = true; micSpeechStart = now; micChunks = [];
+      micRec = new MediaRecorder(micStream, micMime() ? { mimeType: micMime() } : {});
+      micRec.ondataavailable = (e) => { if (e.data.size) micChunks.push(e.data); };
+      micRec.start();
+    }
+  }
+  if (micSpeaking && (now - micLastLoud > MIC_SILENCE_MS || now - micSpeechStart > MIC_MAX_MS)) {
+    micSpeaking = false;
+    const spoke = micLastLoud - micSpeechStart, rec = micRec;
+    rec.onstop = () => { if (spoke >= MIC_MIN_SPEECH_MS) sendHeard(new Blob(micChunks, { type: rec.mimeType || "audio/mp4" })); };
+    rec.stop();
+  }
+}
+
+async function sendHeard(blob) {
+  if (!isActive()) return;
+  micSending = true; renderStatus();
+  const fd = new FormData();
+  fd.append("file", blob, blob.type.includes("mp4") ? "speech.mp4" : "speech.webm");
+  try {
+    const r = await (await fetch("/hear", { method: "POST", body: fd, headers: { "X-Device": deviceId } })).json();
+    if (!r.ok && r.reason) console.info("hear:", r.reason);
+  } catch (e) { console.warn("hear failed", e); }
+  micSending = false; renderStatus();
+}
+
+$("cam").addEventListener("click", (e) => { e.stopPropagation(); $("cam").classList.toggle("big"); });
+
+// ------------------------------------------------------------------ connect another screen (QR)
+let qrFor = "";
+function showQr() {
+  const url = location.origin + "/";
+  $("qrUrl").textContent = url;
+  if (qrFor === url) return;
+  qrFor = url; $("qrHere").innerHTML = "";
+  if (window.QRCode) new QRCode($("qrHere"), { text: url, width: 130, height: 130, correctLevel: QRCode.CorrectLevel.M });
+  else $("qrHere").textContent = "QR needs internet";
+}
 
 // ------------------------------------------------------------------ start
 addEventListener("resize", () => { gridKey = ""; render(); });

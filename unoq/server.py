@@ -149,6 +149,9 @@ first_move_ts = None
 pending_sugg = None
 pending_question = None
 spoken_seq = 0
+TALK_PORT = 8080
+heard_until = 0.0       # camera results don't replace "heard" replies until this time
+HEARD_HOLD_S = 30
 ACTIVE_STALE_S = 60     # auto-claim allowed if the active device was silent this long
 RELEASE_AFTER_S = 10    # release active after this long disconnected
 
@@ -184,6 +187,33 @@ ENV = load_env()
 GEMINI_KEY = ENV.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = ENV.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 GEMINI_THINKING = ENV.get("GEMINI_THINKING") or "minimal"
+# If a model runs out of free daily quota, fall back to the next one that still has some.
+GEMINI_MODELS = list(dict.fromkeys([GEMINI_MODEL] + [m.strip() for m in (ENV.get("GEMINI_FALLBACK_MODELS") or
+                     "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3-flash-preview").split(",") if m.strip()]))
+gemini_exhausted = {}   # model -> time.time() when its quota should be back
+GEMINI_PAUSE_FILE = os.path.join(HERE, "GEMINI_PAUSED")   # touch this file to stop all Gemini calls
+
+
+def gemini_paused():
+    return os.path.exists(GEMINI_PAUSE_FILE)
+
+
+def gemini_model():
+    now = time.time()
+    for m in GEMINI_MODELS:
+        if gemini_exhausted.get(m, 0) <= now:
+            return m
+    return min(GEMINI_MODELS, key=lambda m: gemini_exhausted.get(m, 0))
+
+
+def note_quota(model, status, message):
+    """Remember a model that hit its daily quota (HTTP 429 'per day'), so we skip it until it resets."""
+    if status != 429 or "quota" not in message.lower():
+        return
+    m = re.search(r"retry in (?:(\d+)h)?(?:(\d+)m)?", message)
+    secs = (int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60) if m and (m.group(1) or m.group(2)) else 3600
+    gemini_exhausted[model] = time.time() + secs
+    log(f"Gemini {model} out of quota for {secs // 60} min; next: {gemini_model()}")
 
 
 # ---------------------------------------------------------------- serial / websocket
@@ -256,7 +286,7 @@ def health_snapshot():
                   "devices": sorted({d["name"] for d in devices.values()})},
         "gemini": health["gemini"],
         # TODO(/tts): report the real ElevenLabs status once Test 4 adds /tts.
-        "elevenlabs": {"ok": None, "err": "not set up yet (using the phone's built-in voice)"},
+        "elevenlabs": dict(eleven_health),
         "internet": health["internet"],
         "tunnel": {"ok": bool(tunnel_url()), "url": tunnel_url(), "err": "" if tunnel_url() else "tunnel not up yet"},
         "source": SOURCE,
@@ -440,7 +470,8 @@ def scan_order():
 def public_state():
     return {"type": "STATE", "highlight": state["highlight"], "suggestions": state["suggestions"],
             "question": state["question"], "spoken": state["spoken"], "row_hidden": state["row_hidden"],
-            "grid": grid_items(), "active": dict(active), "mega": headband_ok()}
+            "grid": grid_items(), "active": dict(active), "mega": headband_ok(),
+            "voice": voice_public(), "listen": listen_state}
 
 
 async def push_state():
@@ -578,11 +609,11 @@ def offer_suggestions(phrases, source, scene=""):
     global pending_sugg
     seen = {p.lower() for p in phrases}
     incoming = (list(phrases) + [p for p in offline_phrases() if p.lower() not in seen])[:4]
-    cur = state["suggestions"]["phrases"]
+    cur = state["suggestions"]["phrases"] if source != "heard" else []
     keep = [p if any(q.lower() == p.lower() for q in incoming) else None for p in cur]
     fresh = [q for q in incoming if not any(p and p.lower() == q.lower() for p in keep)]
     merged = [(p or (fresh.pop(0) if fresh else "")) for p in keep] + fresh
-    merged = merged[:4]
+    merged = (merged + [""] * 4)[:4] if source == "heard" else merged[:4]
     if merged == cur and source == state["suggestions"]["source"]:
         pending_sugg = None
         if scene and scene != state["suggestions"].get("scene"):
@@ -606,11 +637,13 @@ async def scheduler():
             q, pending_question = pending_question, None
             state["question"] = q
             state["highlight"] = 0
-            state["spoken"] = {"text": q["question"], "kind": "question", "asker": q["asker"], "seq": spoken_seq}
+            state["spoken"] = {"text": q["question"], "kind": "heard" if q.get("mode") == "listen" else "question",
+                               "asker": q["asker"], "seq": spoken_seq}
             asyncio.ensure_future(expire_question(q["id"]))
             await push_state()
         if pending_sugg and idle >= 3.0:
             state["suggestions"], pending_sugg = pending_sugg, None
+            warm_cache(state["suggestions"]["phrases"])
             await push_state()
 
 
@@ -665,7 +698,13 @@ def names():
     return prof.get("name") or "them", prof.get("caregiver_name") or ""
 
 
+ALERTS_ON = (ENV.get("SIRENIZE_ALERTS") or "on").lower() not in ("off", "0", "false", "no")
+
+
 def urgent_list():
+    """Phrases that raise the dashboard's urgent banner. Empty when SIRENIZE_ALERTS=off in .env."""
+    if not ALERTS_ON:
+        return []
     lst = load_profile().get("urgent_phrases")
     return [u for u in lst if isinstance(u, str)] if isinstance(lst, list) and lst else DEFAULT_URGENT
 
@@ -675,10 +714,23 @@ def notify_watch(text):
     log(f"NOTIFY_WATCH (stub): {text!r}")
 
 
+CONVO_CSV = os.path.join(HERE, "conversation.csv")
+
+
 async def add_convo(text, source, **extra):
-    entry = {"ts": int(time.time() * 1000), "text": text, "source": source, **extra}
+    entry = {"ts": int(time.time() * 1000), "text": text, "source": source,
+             "urgent": source not in ("question", "heard", "caregiver") and _norm(text) in {_norm(u) for u in urgent_list()},
+             **extra}
     convo.append(entry)
     del convo[:-300]
+    new = not os.path.exists(CONVO_CSV)
+    with open(CONVO_CSV, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["time", "phrase", "how", "urgent"])
+        w.writerow([datetime.now().isoformat(timespec="seconds"), text, source,
+                    "yes" if _norm(text) in {_norm(u) for u in urgent_list()} else ""])
+    await to_dashboards({"type": "SUMMARY", "summary": data_summary()})
     await to_dashboards({"type": "CONVO", "entry": entry})
     return entry
 
@@ -731,10 +783,8 @@ async def dashboard_ws(request):
     name, caregiver = names()
     log(f"Dashboard connected ({len(dashboards)})")
     await ws.send_str(json.dumps({
-        "type": "INIT", "name": name, "caregiver": caregiver,
-        "conversation": convo[-200:], "questions": list(questions.values())[-20:],
-        "camera": camera_state, "alert": alert, "phrases": load_custom_phrases(),
-        "health": health_snapshot(),
+        "type": "INIT", "name": name, "conversation": convo[-200:],
+        "alert": alert, "health": health_snapshot(), "summary": data_summary(),
     }))
     try:
         async for _ in ws:
@@ -761,7 +811,7 @@ async def gemini_json(parts, schema):
         return await _gemini_json_once(parts, schema, GEMINI_TIMEOUT_S)
     except RuntimeError as e:
         left = GEMINI_TIMEOUT_S - (time.time() - t0)
-        if not str(e).startswith(("Gemini HTTP 503", "Gemini HTTP 429")) or left < 1.5:
+        if not str(e).startswith(("Gemini HTTP 503", "Gemini HTTP 429")) or left < 1.0:
             raise
         log(f"Gemini busy ({str(e)[:40]}), retrying once with {left:.1f} s left")
         data, _ = await _gemini_json_once(parts, schema, left)
@@ -771,12 +821,15 @@ async def gemini_json(parts, schema):
 async def _gemini_json_once(parts, schema, timeout_s):
     if not GEMINI_KEY:
         raise RuntimeError("no GEMINI_API_KEY in .env")
+    if gemini_paused():
+        raise RuntimeError("Gemini paused")
     t0 = time.time()
+    model = gemini_model()
     payload = {"contents": [{"parts": parts}], "generationConfig": {
         "responseMimeType": "application/json", "responseSchema": schema,
         "thinkingConfig": {"thinkingLevel": GEMINI_THINKING}}}
     try:
-        async with http.post(GEMINI_URL.format(model=GEMINI_MODEL), json=payload,
+        async with http.post(GEMINI_URL.format(model=model), json=payload,
                              headers={"x-goog-api-key": GEMINI_KEY},
                              timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
             text = await r.text()
@@ -785,6 +838,7 @@ async def _gemini_json_once(parts, schema, timeout_s):
                     msg = json.loads(text)["error"]["message"]
                 except Exception:
                     msg = text[:200]
+                note_quota(model, r.status, msg)
                 raise RuntimeError(f"Gemini HTTP {r.status}: {msg}".replace(GEMINI_KEY, "<KEY>"))
         data = json.loads(json.loads(text)["candidates"][0]["content"]["parts"][0]["text"])
     except asyncio.TimeoutError:
@@ -818,19 +872,30 @@ def clean_options(raw, kind="yes_no"):
 
 
 async def ask(request):
-    global q_counter
     try:
         question = " ".join(str((await request.json())["question"]).split())[:200]
     except Exception:
         return web.json_response({"ok": False, "reason": "need JSON with question"}, status=400)
     if not question:
         return web.json_response({"ok": False, "reason": "empty question"}, status=400)
+    q = await ask_core(question, mode="ask")
+    return web.json_response({"ok": True, "question": q, "phones": len(clients)})
+
+
+async def ask_core(question, mode="ask", extra=None):
+    """Gemini -> 3 reply options + "Something else", queued for the talking screen.
+    mode "ask": typed by the caregiver. mode "listen": transcribed from someone speaking."""
+    global q_counter, pending_question
     t0 = time.time()
     q_counter += 1
     qid = f"q{int(t0)}-{q_counter}"
     name, caregiver = names()
-    await add_convo(question, "question", qid=qid, asker=caregiver or "Caregiver")
-    prompt = ASK_PROMPT.format(question=question.replace('"', "'"),
+    who = (caregiver or "Caregiver") if mode == "ask" else "Someone"
+    await add_convo(question, "question" if mode == "ask" else "heard", qid=qid, asker=who)
+    base_prompt = ASK_PROMPT if mode == "ask" else ASK_PROMPT.replace(
+        "answer a question from their caregiver", "reply to something a person just said to them out loud").replace(
+        'Question: "{question}"', 'What they said (speech transcript, may be a statement or a question): "{question}"')
+    prompt = base_prompt.format(question=question.replace('"', "'"),
                                profile=json.dumps(load_profile(), ensure_ascii=False),
                                last_scene=camera_state.get("scene", ""), recent=json.dumps(recent_said))
     kind, fallback, reason, gem_ms = "yes_no", False, "", None
@@ -846,19 +911,19 @@ async def ask(request):
         health["gemini"] = {"ok": False, "err": reason}
         log(f"ASK fallback: {reason}")
     options = options + [SOMETHING_ELSE]
-    # TODO(/tts): prefetch audio for all 4 options in parallel once /tts exists.
+    warm_cache(options)                         # prefetch the 4 replies in the user's voice
     q = {"id": qid, "question": question, "kind": kind, "options": options, "fallback": fallback,
          "reason": reason, "gemini_ms": gem_ms, "sent_ts": int(time.time() * 1000), "shown_ms": None,
-         "answer": None, "answer_ms": None, "status": "waiting"}
+         "answer": None, "answer_ms": None, "status": "waiting", "mode": mode, **(extra or {})}
     questions[qid] = q
     while len(questions) > 50:
         questions.pop(next(iter(questions)))
-    global pending_question
-    pending_question = {"id": qid, "question": question, "options": options, "asker": caregiver or ""}
+    pending_question = {"id": qid, "question": question, "options": options,
+                        "asker": who if mode == "ask" else "", "mode": mode}
     await to_dashboards({"type": "QUESTION_UPDATE", "question": q})
     await to_dashboards({"type": "HEALTH", **health_snapshot()})
-    log(f"ASK {qid} ({int((time.time()-t0)*1000)} ms, gemini {gem_ms} ms) {question!r} -> {options}")
-    return web.json_response({"ok": True, "question": q, "phones": len(clients)})
+    log(f"ASK[{mode}] {qid} ({int((time.time()-t0)*1000)} ms, gemini {gem_ms} ms) {question!r} -> {options}")
+    return q
 
 
 async def ack(_request):
@@ -938,7 +1003,7 @@ def lan_ip():
 
 async def links(request):
     import socket
-    port = request.url.port or 8080
+    port = TALK_PORT
     host = socket.gethostname()
     return web.json_response({"go": f"http://{host}.local:{port}/go",
                               "go_ip": f"http://{lan_ip()}:{port}/go" if lan_ip() else "",
@@ -1054,6 +1119,8 @@ async def predict(request):
     dev = request.headers.get("X-Device", "")
     if dev and active["id"] and dev != active["id"]:
         return web.json_response({"ok": False, "reason": "not the active device", "ms": 0})
+    if gemini_paused():
+        return web.json_response({"ok": False, "reason": "Gemini paused", "ms": 0})
 
     def fail(reason, status=None):
         ms = int((time.time() - t0) * 1000)
@@ -1092,8 +1159,9 @@ async def predict(request):
         },
     }
     try:
+        model = gemini_model()
         async with http.post(
-            GEMINI_URL.format(model=GEMINI_MODEL),
+            GEMINI_URL.format(model=model),
             json=payload,
             headers={"x-goog-api-key": GEMINI_KEY},
             timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_S),
@@ -1104,6 +1172,7 @@ async def predict(request):
                     msg = json.loads(text)["error"]["message"]
                 except Exception:
                     msg = text[:200]
+                note_quota(model, r.status, msg)
                 return fail(f"Gemini HTTP {r.status}: {msg}".replace(GEMINI_KEY, "<KEY>"), r.status)
             data = json.loads(text)
         out = json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
@@ -1126,7 +1195,7 @@ async def predict(request):
     camera_state.update({"scene": scene, "phrases": phrases, "ms": ms, "ok": True, "reason": "",
                          "confidence": conf, "ts": int(time.time() * 1000)})
     await to_dashboards({"type": "CAMERA", "camera": camera_state})
-    if phrases and conf >= 0.4:
+    if phrases and conf >= 0.4 and time.time() >= heard_until:
         offer_suggestions(phrases, "camera", scene)
     elif not state["suggestions"]["phrases"]:
         go_offline()
@@ -1178,6 +1247,591 @@ async def stats(_request):
     return web.json_response(out)
 
 
+# ---------------------------------------------------------------- ElevenLabs: voice + listen
+ELEVEN_KEY = ENV.get("ELEVENLABS_API_KEY", "")
+ELEVEN = "https://api.elevenlabs.io"
+DEFAULT_VOICE_ID = ENV.get("ELEVENLABS_DEFAULT_VOICE") or "JBFqnCBsd6RMkjVDRZzb"
+DEFAULT_VOICE_NAME = ENV.get("ELEVENLABS_DEFAULT_VOICE_NAME") or "Default voice"
+TTS_MODEL = ENV.get("ELEVENLABS_TTS_MODEL") or "eleven_flash_v2_5"
+STT_MODEL = ENV.get("ELEVENLABS_STT_MODEL") or "scribe_v2"
+VOICE_FILE = os.path.join(HERE, "voice.json")            # USER_VOICE_ID lives here (server only)
+AUDIO_CACHE = os.path.join(HERE, "audio_cache")
+VOICE_TMP = os.path.join(HERE, "voice_tmp")              # raw samples, deleted after cloning
+SAMPLE_PHRASES = ["Hi, it's me.", "I love you.", "I need help."]
+eleven_health = {"ok": None if ELEVEN_KEY else False, "err": "" if ELEVEN_KEY else "no ELEVENLABS_API_KEY in .env"}
+listen_state = {"on": False}
+warm_sem = None
+regen = {"running": False, "done": 0, "total": 0}
+
+
+def eleven_headers(json_body=False):
+    h = {"xi-api-key": ELEVEN_KEY}
+    if json_body:
+        h["Content-Type"] = "application/json"
+    return h
+
+
+def eleven_error(status, text):
+    try:
+        d = json.loads(text).get("detail")
+        msg = d.get("message") if isinstance(d, dict) else str(d)
+    except Exception:
+        msg = text[:200]
+    return f"ElevenLabs HTTP {status}: {msg}".replace(ELEVEN_KEY, "<KEY>") if ELEVEN_KEY else msg
+
+
+def load_voice():
+    try:
+        with open(VOICE_FILE) as f:
+            v = json.load(f)
+        return v if v.get("voice_id") else None
+    except (OSError, ValueError):
+        return None
+
+
+def current_voice_id():
+    v = load_voice()
+    return v["voice_id"] if v else DEFAULT_VOICE_ID
+
+
+def voice_public():
+    v = load_voice()
+    return {"id": current_voice_id(), "name": v["name"] if v else DEFAULT_VOICE_NAME,
+            "is_user": bool(v), "source": v.get("source") if v else "default",
+            "created": v.get("created") if v else None, "tts": bool(ELEVEN_KEY)}
+
+
+def cache_path(voice_id, text):
+    import hashlib
+    h = hashlib.sha1(f"{TTS_MODEL}|{text}".encode()).hexdigest()[:20]
+    return os.path.join(AUDIO_CACHE, voice_id, h + ".mp3")
+
+
+async def tts_bytes(text, voice_id, use_cache=True):
+    """Audio for text in voice_id. Cached on disk so phrases keep playing offline."""
+    path = cache_path(voice_id, text)
+    if use_cache and os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    if not ELEVEN_KEY:
+        raise RuntimeError("no ELEVENLABS_API_KEY in .env")
+    try:
+        async with http.post(f"{ELEVEN}/v1/text-to-speech/{voice_id}?output_format=mp3_44100_64",
+                             json={"text": text, "model_id": TTS_MODEL}, headers=eleven_headers(True),
+                             timeout=aiohttp.ClientTimeout(total=8)) as r:
+            body = await r.read()
+            if r.status != 200:
+                raise RuntimeError(eleven_error(r.status, body.decode(errors="replace")))
+    except asyncio.TimeoutError:
+        raise RuntimeError("ElevenLabs timeout")
+    except aiohttp.ClientError as e:
+        raise RuntimeError(f"network: {e.__class__.__name__}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".part", "wb") as f:
+        f.write(body)
+    os.replace(path + ".part", path)
+    eleven_health.update(ok=True, err="")
+    return body
+
+
+async def tts(request):
+    text = " ".join(request.query.get("text", "").split())[:160]
+    if not text:
+        return web.Response(status=400, text="text required\n")
+    voice_id = request.query.get("v") or current_voice_id()
+    if not re.fullmatch(r"[A-Za-z0-9]{8,40}", voice_id):
+        return web.Response(status=400, text="bad voice id\n")
+    try:
+        audio = await tts_bytes(text, voice_id)
+    except RuntimeError as e:
+        eleven_health.update(ok=False, err=str(e))
+        log(f"TTS fail: {e}")
+        return web.Response(status=503, text=str(e))
+    return web.Response(body=audio, content_type="audio/mpeg",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+def warm_cache(texts, voice_id=None):
+    """Fetch audio for these phrases in the background (3 at a time)."""
+    if not ELEVEN_KEY:
+        return
+    voice_id = voice_id or current_voice_id()
+
+    async def one(t):
+        async with warm_sem:
+            try:
+                await tts_bytes(t, voice_id)
+            except RuntimeError as e:
+                eleven_health.update(ok=False, err=str(e))
+
+    for t in {t for t in texts if t}:
+        if not os.path.exists(cache_path(voice_id, t)):
+            asyncio.ensure_future(one(t))
+
+
+def all_phrases():
+    texts = [g["text"] for g in grid_items()] + state["suggestions"]["phrases"] + offline_phrases()
+    texts += BASIC_ANSWERS + [SOMETHING_ELSE, "Can you help me?", "Please come here", "I'm cold",
+                              "Please wait", "Good morning", "I'm hungry", "I'm tired"]
+    if state["question"]:
+        texts += state["question"]["options"]
+    seen, out = set(), []
+    for t in texts:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+async def regenerate_all(voice_id):
+    """Re-create every cached phrase in the new voice, reporting progress to the dashboard."""
+    texts = all_phrases()
+    regen.update(running=True, done=0, total=len(texts))
+    await to_dashboards({"type": "VOICE_PROGRESS", **regen})
+    sem = asyncio.Semaphore(3)
+
+    async def one(t):
+        async with sem:
+            try:
+                await tts_bytes(t, voice_id)
+            except RuntimeError as e:
+                log(f"regenerate {t!r}: {e}")
+            regen["done"] += 1
+            await to_dashboards({"type": "VOICE_PROGRESS", **regen})
+
+    await asyncio.gather(*(one(t) for t in texts))
+    regen["running"] = False
+    await to_dashboards({"type": "VOICE_PROGRESS", **regen})
+    await push_state()                          # talking screens switch to the new voice
+    log(f"Voice cache regenerated: {regen['done']}/{regen['total']} phrases in {voice_id}")
+
+
+# ----- voice banking endpoints (dashboard, local only)
+async def eleven_get(path):
+    async with http.get(f"{ELEVEN}{path}", headers=eleven_headers(), timeout=aiohttp.ClientTimeout(total=10)) as r:
+        text = await r.text()
+        if r.status != 200:
+            raise RuntimeError(eleven_error(r.status, text))
+        return json.loads(text)
+
+
+async def voice_info(_request):
+    out = {"voice": voice_public(), "regen": regen, "plan": None, "can_clone": None, "plan_err": ""}
+    try:
+        sub = await eleven_get("/v1/user/subscription")
+        out["plan"] = sub.get("tier")
+        out["can_clone"] = sub.get("can_use_instant_voice_cloning")
+        out["credits"] = {"used": sub.get("character_count"), "limit": sub.get("character_limit")}
+    except RuntimeError as e:
+        out["plan_err"] = str(e)
+    try:
+        out["samples_seconds"] = sample_seconds()
+    except OSError:
+        out["samples_seconds"] = 0
+    return web.json_response(out)
+
+
+async def voice_library(_request):
+    try:
+        d = await eleven_get("/v1/voices")
+    except RuntimeError as e:
+        return web.json_response({"ok": False, "reason": str(e)})
+    voices = [{"voice_id": v["voice_id"], "name": v["name"], "category": v.get("category"),
+               "preview_url": v.get("preview_url"), "labels": v.get("labels") or {}}
+              for v in d.get("voices", []) if v.get("category") in ("premade", "professional", "generated", "cloned")]
+    return web.json_response({"ok": True, "voices": voices})
+
+
+async def run(*cmd):
+    p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await p.communicate()
+    return p.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def sample_seconds():
+    total = 0.0
+    if os.path.isdir(VOICE_TMP):
+        for fn in os.listdir(VOICE_TMP):
+            if fn.endswith(".secs"):
+                total += float(open(os.path.join(VOICE_TMP, fn)).read() or 0)
+    return round(total, 1)
+
+
+async def voice_upload(request):
+    """Recorded or uploaded audio/video -> mono MP3 with silences trimmed (ffmpeg)."""
+    import uuid
+    os.makedirs(VOICE_TMP, exist_ok=True)
+    reader = await request.multipart()
+    consent, saved = False, []
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "consent":
+            consent = (await part.text()) == "yes"
+        elif part.name == "file":
+            if not consent:
+                return web.json_response({"ok": False, "reason": "consent is required before uploading audio"}, status=400)
+            raw = os.path.join(VOICE_TMP, uuid.uuid4().hex + ".raw")
+            size = 0
+            with open(raw, "wb") as f:
+                while True:
+                    chunk = await part.read_chunk(1 << 16)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > 60 * 1024 * 1024:
+                        f.close(); os.remove(raw)
+                        return web.json_response({"ok": False, "reason": "file too large (60 MB max)"})
+                    f.write(chunk)
+            mp3 = raw[:-4] + ".mp3"
+            code, _, err = await run("ffmpeg", "-y", "-loglevel", "error", "-i", raw, "-vn", "-ac", "1", "-ar", "44100",
+                                     "-af", "silenceremove=start_periods=1:start_threshold=-45dB:"
+                                            "stop_periods=-1:stop_duration=0.6:stop_threshold=-45dB",
+                                     "-b:a", "128k", mp3)
+            os.remove(raw)
+            if code != 0 or not os.path.exists(mp3):
+                return web.json_response({"ok": False, "reason": f"couldn't read {part.filename or 'file'}: {err.strip()[-160:]}"})
+            code, out, _ = await run("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", mp3)
+            secs = float(out.strip() or 0)
+            if secs < 1:
+                os.remove(mp3)
+                continue
+            open(mp3[:-4] + ".secs", "w").write(str(secs))
+            saved.append({"name": part.filename or "recording", "seconds": round(secs, 1)})
+    log(f"VOICE samples added: {saved} (total {sample_seconds()} s)")
+    return web.json_response({"ok": True, "added": saved, "total_seconds": sample_seconds()})
+
+
+def clear_samples():
+    import shutil
+    shutil.rmtree(VOICE_TMP, ignore_errors=True)
+
+
+async def voice_clear(_request):
+    clear_samples()
+    return web.json_response({"ok": True, "total_seconds": 0})
+
+
+async def voice_clone(request):
+    d = await request.json()
+    if d.get("consent") is not True:
+        return web.json_response({"ok": False, "reason": "consent is required"}, status=400)
+    files = sorted(f for f in os.listdir(VOICE_TMP) if f.endswith(".mp3")) if os.path.isdir(VOICE_TMP) else []
+    if not files:
+        return web.json_response({"ok": False, "reason": "no usable audio yet"})
+    name = (d.get("name") or "My voice")[:40]
+    t0 = time.time()
+    form = aiohttp.FormData()
+    form.add_field("name", name)
+    form.add_field("remove_background_noise", "true")
+    form.add_field("description", "Sirenize voice bank (consented)")
+    handles = []
+    for fn in files[:25]:
+        fh = open(os.path.join(VOICE_TMP, fn), "rb")
+        handles.append(fh)
+        form.add_field("files", fh, filename=fn, content_type="audio/mpeg")
+    try:
+        async with http.post(f"{ELEVEN}/v1/voices/add", data=form, headers=eleven_headers(),
+                             timeout=aiohttp.ClientTimeout(total=120)) as r:
+            text = await r.text()
+            if r.status != 200:
+                reason = eleven_error(r.status, text)
+                if "missing the permission" in reason:
+                    perm = re.search(r"permission (\w+)", reason)
+                    return web.json_response({"ok": False, "reason": reason, "fallback":
+                        f"Turn on '{perm.group(1) if perm else 'Voices: Write'}' for this API key at elevenlabs.io "
+                        "→ API Keys → Edit, then press Create my voice again. Your audio is still saved."})
+                return web.json_response({"ok": False, "reason": reason,
+                                          "fallback": "Cloning isn't available with this ElevenLabs plan or key. "
+                                                      "Pick a voice that feels like you instead."})
+            voice_id = json.loads(text)["voice_id"]
+    finally:
+        for fh in handles:
+            fh.close()
+    secs = round(time.time() - t0, 1)
+    clear_samples()                              # never keep raw voice audio after cloning
+    log(f"VOICE cloned {name!r} -> {voice_id} in {secs} s; raw samples deleted")
+    return web.json_response({"ok": True, "voice_id": voice_id, "name": name, "seconds": secs, "source": "clone"})
+
+
+async def voice_design(request):
+    d = await request.json()
+    desc = " ".join(str(d.get("description", "")).split())[:500]
+    if len(desc) < 10:
+        return web.json_response({"ok": False, "reason": "describe the voice in a few words (10+ characters)"})
+    try:
+        async with http.post(f"{ELEVEN}/v1/text-to-voice/design?output_format=mp3_44100_64",
+                             json={"voice_description": desc, "auto_generate_text": True},
+                             headers=eleven_headers(True), timeout=aiohttp.ClientTimeout(total=60)) as r:
+            text = await r.text()
+            if r.status != 200:
+                return web.json_response({"ok": False, "reason": eleven_error(r.status, text)})
+            out = json.loads(text)
+    except asyncio.TimeoutError:
+        return web.json_response({"ok": False, "reason": "ElevenLabs timeout"})
+    previews = [{"generated_voice_id": p["generated_voice_id"], "audio": p["audio_base_64"],
+                 "media_type": p.get("media_type", "audio/mpeg")} for p in out.get("previews", [])]
+    return web.json_response({"ok": True, "previews": previews, "description": desc})
+
+
+async def voice_design_save(request):
+    d = await request.json()
+    body = {"voice_name": (d.get("name") or "My voice")[:40], "voice_description": d.get("description", "")[:500],
+            "generated_voice_id": d.get("generated_voice_id", "")}
+    async with http.post(f"{ELEVEN}/v1/text-to-voice", json=body, headers=eleven_headers(True),
+                         timeout=aiohttp.ClientTimeout(total=30)) as r:
+        text = await r.text()
+        if r.status != 200:
+            return web.json_response({"ok": False, "reason": eleven_error(r.status, text)})
+        return web.json_response({"ok": True, "voice_id": json.loads(text)["voice_id"], "name": body["voice_name"],
+                                  "source": "designed"})
+
+
+async def voice_preview(request):
+    voice_id = request.query.get("v", "")
+    i = int(request.query.get("i", "0")) % len(SAMPLE_PHRASES)
+    if not re.fullmatch(r"[A-Za-z0-9]{8,40}", voice_id):
+        return web.Response(status=400, text="bad voice id\n")
+    try:
+        audio = await tts_bytes(SAMPLE_PHRASES[i], voice_id)
+    except RuntimeError as e:
+        return web.Response(status=503, text=str(e))
+    return web.Response(body=audio, content_type="audio/mpeg")
+
+
+async def voice_approve(request):
+    d = await request.json()
+    voice_id = d.get("voice_id", "")
+    if not re.fullmatch(r"[A-Za-z0-9]{8,40}", voice_id):
+        return web.json_response({"ok": False, "reason": "bad voice id"})
+    v = {"voice_id": voice_id, "name": (d.get("name") or "My voice")[:40], "source": d.get("source", "clone"),
+         "created": datetime.now().isoformat(timespec="minutes")}
+    with open(VOICE_FILE, "w") as f:
+        json.dump(v, f, indent=2)
+    log(f"VOICE approved: {v}")
+    asyncio.ensure_future(regenerate_all(voice_id))
+    return web.json_response({"ok": True, "voice": voice_public(), "total": len(all_phrases())})
+
+
+async def voice_delete(_request):
+    v = load_voice()
+    if not v:
+        return web.json_response({"ok": False, "reason": "no personal voice is set"})
+    confirmation = "not a cloned voice: just switched back to the default voice"
+    if v.get("source") in ("clone", "designed"):
+        async with http.delete(f"{ELEVEN}/v1/voices/{v['voice_id']}", headers=eleven_headers(),
+                               timeout=aiohttp.ClientTimeout(total=20)) as r:
+            text = await r.text()
+            if r.status != 200:
+                return web.json_response({"ok": False, "reason": eleven_error(r.status, text)})
+            confirmation = text
+    os.remove(VOICE_FILE)
+    import shutil
+    shutil.rmtree(os.path.join(AUDIO_CACHE, v["voice_id"]), ignore_errors=True)
+    log(f"VOICE deleted {v['voice_id']}: {confirmation}")
+    warm_cache(all_phrases())
+    await push_state()
+    return web.json_response({"ok": True, "api_response": confirmation, "voice": voice_public()})
+
+
+# ----- hearing on the talking screen
+HEAR_EXTRA = "Can you say that again?"
+HEAR_PROMPT = (
+    "You help a person with ALS reply to someone who is talking to them right now. They cannot speak or use "
+    "their hands; they pick a reply with head movements, and it is spoken in their own voice.\n"
+    "What the other person just said (speech transcript, may be messy or partial): \"{heard}\"\n"
+    "About the user: {profile}\n"
+    "What the camera sees (may be empty): \"{scene}\"\n"
+    "What the user said recently: {recent}\n"
+    "Write exactly 3 different replies the user would most likely want to say back.\n"
+    "Rules: first person, natural spoken English, 2-7 words each, warm and dignified. Make each reply specific to "
+    "what was said (for 'Do you want to go outside?' write e.g. 'Yes, let's go outside', 'Not today, I'm tired', "
+    "'Maybe after lunch' - never just 'Yes' or 'No' on their own). Cover different intents: agree, decline or "
+    "postpone, and a useful follow-up. Never give medical advice or invent facts about people. If the transcript "
+    "is unclear, give replies that still make sense.\n"
+    "Return JSON: {{\"options\": [3 strings]}}."
+)
+HEAR_SCHEMA = {"type": "OBJECT", "properties": {"options": {"type": "ARRAY", "items": {"type": "STRING"}}},
+               "required": ["options"]}
+
+
+async def hear(request):
+    """Audio from the ACTIVE talking screen's mic: someone spoke to the user.
+    Transcribe it, ask Gemini for replies, and put them in the shared Suggested row."""
+    global heard_until
+    dev = request.headers.get("X-Device", "")
+    if not active["id"] or dev != active["id"]:
+        return web.json_response({"ok": False, "reason": "not the active device"})
+    t0 = time.time()
+    reader = await request.multipart()
+    audio, mime = None, "audio/mp4"
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "file":
+            mime = part.headers.get("Content-Type", mime)
+            audio = await part.read()
+    if not audio or not ELEVEN_KEY:
+        return web.json_response({"ok": False, "reason": "no audio" if not audio else "speech-to-text not set up"})
+    ext = "mp4" if "mp4" in mime else "webm"
+    form = aiohttp.FormData()
+    form.add_field("model_id", STT_MODEL)
+    form.add_field("file", audio, filename=f"speech.{ext}", content_type=mime)
+    try:
+        async with http.post(f"{ELEVEN}/v1/speech-to-text", data=form, headers=eleven_headers(),
+                             timeout=aiohttp.ClientTimeout(total=6)) as r:
+            text = await r.text()
+            if r.status != 200:
+                err = eleven_error(r.status, text)
+                eleven_health.update(ok=False, err=err)
+                log(f"HEAR: speech-to-text failed: {err}")
+                return web.json_response({"ok": False, "reason": "Didn't catch that"})
+            transcript = " ".join(json.loads(text).get("text", "").split())
+    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+        log(f"HEAR: speech-to-text {e.__class__.__name__}")
+        return web.json_response({"ok": False, "reason": "Didn't catch that"})
+    stt_ms = int((time.time() - t0) * 1000)
+    words = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", transcript)
+    if len(re.findall(r"[A-Za-z]{2,}", words)) < 2:            # noise, a cough, "(music)"...
+        return web.json_response({"ok": False, "reason": "Didn't catch that", "stt_ms": stt_ms})
+    transcript = transcript[:200]
+    await add_convo(transcript, "heard")
+    prompt = HEAR_PROMPT.format(heard=transcript.replace('"', "'"), profile=json.dumps(load_profile(), ensure_ascii=False),
+                                scene=camera_state.get("scene", ""), recent=json.dumps(recent_said))
+    try:
+        data, gem_ms = await gemini_json([{"text": prompt}], HEAR_SCHEMA)
+        options = clean_options(data.get("options"), "open")
+        health["gemini"] = {"ok": True, "err": ""}
+    except RuntimeError as e:
+        health["gemini"] = {"ok": False, "err": str(e)}
+        options, gem_ms = list(BASIC_ANSWERS), None
+        log(f"HEAR: Gemini fallback ({e})")
+    options = [o for o in options if _norm(o) != _norm(HEAR_EXTRA)][:3] + [HEAR_EXTRA]   # no duplicate
+    heard_until = time.time() + HEARD_HOLD_S
+    offer_suggestions(options, "heard", transcript)
+    total = int((time.time() - t0) * 1000)
+    log(f"HEAR {total} ms (stt {stt_ms} ms, gemini {gem_ms} ms): {transcript!r} -> {options}")
+    return web.json_response({"ok": True, "transcript": transcript, "options": options,
+                              "stt_ms": stt_ms, "gemini_ms": gem_ms, "ms": total})
+
+
+# ----- listen mode
+async def listen_toggle(request):
+    d = await request.json()
+    listen_state["on"] = bool(d.get("on"))
+    await push_state()
+    return web.json_response({"ok": True, **listen_state})
+
+
+async def listen(request):
+    """Audio of someone talking TO the user -> transcript -> reply options on the talking screen."""
+    t0 = time.time()
+    reader = await request.multipart()
+    audio, browser_text, mime = None, "", "audio/webm"
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "file":
+            mime = part.headers.get("Content-Type", mime)
+            audio = await part.read()
+        elif part.name == "browser_text":
+            browser_text = " ".join((await part.text()).split())[:300]
+    transcript, engine, err = "", "", ""
+    if audio and ELEVEN_KEY:
+        form = aiohttp.FormData()
+        form.add_field("model_id", STT_MODEL)
+        form.add_field("file", audio, filename="speech.webm", content_type=mime)
+        try:
+            async with http.post(f"{ELEVEN}/v1/speech-to-text", data=form, headers=eleven_headers(),
+                                 timeout=aiohttp.ClientTimeout(total=6)) as r:
+                text = await r.text()
+                if r.status == 200:
+                    transcript = " ".join(json.loads(text).get("text", "").split())
+                    engine = "ElevenLabs"
+                    eleven_health.update(ok=True, err="")
+                else:
+                    err = eleven_error(r.status, text)
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            err = f"ElevenLabs STT: {e.__class__.__name__}"
+    stt_ms = int((time.time() - t0) * 1000)
+    if not transcript and browser_text:
+        transcript, engine = browser_text, "browser"
+    # drop noise-only transcripts like "(music)" or "..."
+    if not re.search(r"[A-Za-z]{2,}", re.sub(r"\([^)]*\)|\[[^\]]*\]", "", transcript)):
+        log(f"LISTEN: didn't catch that ({err or 'empty transcript'})")
+        return web.json_response({"ok": False, "reason": "Didn't catch that", "detail": err, "stt_ms": stt_ms})
+    q = await ask_core(transcript[:200], mode="listen",
+                       extra={"stt_ms": stt_ms, "engine": engine, "server_received_ts": int(t0 * 1000)})
+    log(f"LISTEN [{engine}] stt {stt_ms} ms: {transcript!r}")
+    return web.json_response({"ok": True, "transcript": transcript, "engine": engine, "stt_ms": stt_ms,
+                              "question": q, "total_ms": int((time.time() - t0) * 1000)})
+
+
+# ---------------------------------------------------------------- data (dashboard)
+def read_csv(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def data_summary():
+    rows = read_csv(CONVO_CSV)
+    today = datetime.now().date().isoformat()
+    by_how, phrases = {}, {}
+    urgent_today = 0
+    for r in rows:
+        by_how[r["how"]] = by_how.get(r["how"], 0) + 1
+        phrases[r["phrase"]] = phrases.get(r["phrase"], 0) + 1
+        if r.get("urgent") == "yes" and r["time"].startswith(today):
+            urgent_today += 1
+    trials = read_csv(TRIALS)
+    speed = {}
+    for t in trials:
+        a = speed.setdefault(t["source"], {"n": 0, "moves": 0, "ms": 0})
+        a["n"] += 1
+        a["moves"] += int(t["moves_since_last_select"])
+        a["ms"] += int(t["ms_since_first_move"])
+    return {
+        "total": len(rows),
+        "today": sum(1 for r in rows if r["time"].startswith(today)),
+        "urgent_today": urgent_today,
+        "by_how": by_how,
+        "top_phrases": sorted(phrases.items(), key=lambda kv: -kv[1])[:8],
+        "speed": {k: {"n": v["n"], "avg_moves": round(v["moves"] / v["n"], 1),
+                      "avg_seconds": round(v["ms"] / v["n"] / 1000, 1)} for k, v in speed.items()},
+        "gestures": {g: counts.get(g, 0) for g in GESTURES},
+    }
+
+
+async def summary(_request):
+    return web.json_response(data_summary())
+
+
+def csv_download(path, name):
+    async def handler(_request):
+        if not os.path.exists(path):
+            return web.Response(text="no data yet\n", content_type="text/plain")
+        return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                               "Content-Type": "text/csv"})
+    return handler
+
+
+async def alert_clear(_request):
+    """Dashboard dismisses the urgent banner. Nothing is sent to the talking screen."""
+    global alert
+    alert = None
+    await to_dashboards({"type": "ALERT_CLEAR"})
+    return web.json_response({"ok": True})
+
+
+async def dashboard_home(_request):
+    return web.FileResponse(os.path.join(PUBLIC, "dashboard.html"), headers=NO_CACHE)
+
+
 # ---------------------------------------------------------------- app
 async def on_startup(_app):
     global loop, http
@@ -1185,8 +1839,11 @@ async def on_startup(_app):
     http = aiohttp.ClientSession()
     _app["internet_task"] = asyncio.ensure_future(internet_loop())
     _app["scheduler_task"] = asyncio.ensure_future(scheduler())
+    global warm_sem
+    warm_sem = asyncio.Semaphore(3)
     go_offline()
     state["suggestions"], _ = {"phrases": offline_phrases(), "source": "offline", "scene": ""}, None
+    warm_cache(all_phrases())
     if SOURCE == "bridge":
         _app["watchdog_task"] = asyncio.ensure_future(heartbeat_watchdog())
 
@@ -1202,45 +1859,82 @@ async def on_cleanup(_app):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", help="serial port (default: auto-detect)")
-    ap.add_argument("--http-port", type=int, default=8080)
+    ap.add_argument("--http-port", type=int, default=8080, help="talking screen (phone/iPad; the tunnel points here)")
+    ap.add_argument("--dashboard-port", type=int, default=8088, help="caregiver dashboard (local network only)")
     ap.add_argument("--source", choices=["serial", "bridge"], default="serial",
                     help="serial: Mega over USB (default). bridge: UNO Q sensor app posts to /event and /heartbeat")
     args = ap.parse_args()
-    global SOURCE
+    global SOURCE, TALK_PORT
     SOURCE = args.source
+    TALK_PORT = args.http_port
 
-    app = web.Application(client_max_size=4 * 1024 * 1024)
+    # Talking screen: everything the user's device needs, nothing else.
+    app = web.Application(client_max_size=12 * 1024 * 1024)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
-    app.router.add_get("/fake/{gesture}", fake)
-    app.router.add_get("/calibrate", calibrate)
-    app.router.add_post("/predict", predict)
-    app.router.add_post("/log", log_trial)
-    app.router.add_get("/stats", stats)
-    app.router.add_get("/dashboard", local_only(dashboard_page))
-    app.router.add_post("/ask", local_only(ask))
-    app.router.add_get("/phrases", get_phrases)
-    app.router.add_post("/phrases", local_only(add_phrase))
-    app.router.add_post("/ack", local_only(ack))
     app.router.add_get("/go", go)
-    app.router.add_get("/links", local_only(links))
+    app.router.add_get("/tts", tts)
+    app.router.add_post("/predict", predict)
+    app.router.add_post("/hear", hear)
+    app.router.add_post("/log", log_trial)
     app.router.add_get("/manifest.webmanifest", static_file("manifest.webmanifest", "application/manifest+json"))
     app.router.add_get("/icon-180.png", static_file("icon-180.png", "image/png"))
     app.router.add_get("/icon-512.png", static_file("icon-512.png", "image/png"))
+    app.router.add_get("/fake/{gesture}", local_only(fake))
+    app.router.add_get("/calibrate", local_only(calibrate))
     app.router.add_post("/event/{gesture}", local_only(bridge_event))
     app.router.add_post("/heartbeat", local_only(heartbeat))
     app.router.add_post("/sensor_status", local_only(sensor_status))
+
+    # Dashboard: separate port, never behind the tunnel. Voice banking + data only.
+    # It only reads data; nothing it does is spoken or shown on the talking screen.
+    dash = web.Application(client_max_size=64 * 1024 * 1024)
+    dash.router.add_get("/", local_only(dashboard_home))
+    dash.router.add_get("/ws", dashboard_ws)
+    dash.router.add_get("/summary", local_only(summary))
+    dash.router.add_get("/stats", local_only(stats))
+    dash.router.add_get("/export/conversation.csv", local_only(csv_download(CONVO_CSV, "sirenize-conversation.csv")))
+    dash.router.add_get("/export/selections.csv", local_only(csv_download(TRIALS, "sirenize-selections.csv")))
+    dash.router.add_post("/alert/clear", local_only(alert_clear))
+    dash.router.add_get("/links", local_only(links))
+    dash.router.add_get("/voice", local_only(voice_info))
+    dash.router.add_get("/voice/library", local_only(voice_library))
+    dash.router.add_post("/voice/upload", local_only(voice_upload))
+    dash.router.add_post("/voice/clear", local_only(voice_clear))
+    dash.router.add_post("/voice/clone", local_only(voice_clone))
+    dash.router.add_post("/voice/design", local_only(voice_design))
+    dash.router.add_post("/voice/design/save", local_only(voice_design_save))
+    dash.router.add_get("/voice/preview", local_only(voice_preview))
+    dash.router.add_post("/voice/approve", local_only(voice_approve))
+    dash.router.add_post("/voice/delete", local_only(voice_delete))
 
     if SOURCE == "serial":
         threading.Thread(target=serial_thread, args=(args.port,), daemon=True).start()
     else:
         log("Source: bridge (UNO Q sensor app); no serial port")
-    log(f"Server on http://0.0.0.0:{args.http_port}")
+    log(f"Talking screen on http://0.0.0.0:{args.http_port}")
+    log(f"Dashboard on http://0.0.0.0:{args.dashboard_port} (local network only, not on the tunnel)")
     log(f"Gemini: model={GEMINI_MODEL} thinking={GEMINI_THINKING} key={'set' if GEMINI_KEY else 'MISSING'}")
-    log(f"Dashboard: http://localhost:{args.http_port}/dashboard (local network only)")
-    web.run_app(app, host="0.0.0.0", port=args.http_port, print=None, shutdown_timeout=1)
+
+    async def serve():
+        runners = []
+        for a, port in ((app, args.http_port), (dash, args.dashboard_port)):
+            r = web.AppRunner(a, access_log=None, shutdown_timeout=1)
+            await r.setup()
+            await web.TCPSite(r, "0.0.0.0", port).start()
+            runners.append(r)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            for r in runners:
+                await r.cleanup()
+
+    try:
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

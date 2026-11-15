@@ -17,3 +17,9 @@ __pycache__/
 profile.json
 phrases.json
 trials.csv
+voice.json
+audio_cache/
+voice_tmp/
+tunnel_url.txt
+.env.local
+conversation.csv

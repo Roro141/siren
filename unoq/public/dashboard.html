@@ -3,446 +3,441 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SOMEBODY · Caregiver</title>
+<title>Sirenize · Caregiver</title>
 <style>
   :root {
-    --bg: #121417; --panel: #1B1F24; --panel2: #22272E; --line: #2E343C;
-    --text: #F2F4F7; --muted: #A3ABB6; --faint: #6B7480;
-    --accent: #FFD54A; --accent-text: #121417;
-    --ok: #3FB27F; --warn: #D9A13B; --bad: #D95C5C; --off: #4B525C;
-    --answer: #3BA59B; --answer-bg: #1E3A36; --urgent-bg: #7A1A1A;
-    --lane-left: #5B8BD6; --lane-right: #C9962B; --lane-nod: #3BA59B; --lane-home: #7A828C;
+    --bg: #FAFAF8; --paper: #FFFFFF; --ink: #1D1F21; --sub: #5F6368; --rule: #E3E3DF; --soft: #F2F2EE;
+    --blue: #1F5FAD; --green: #2E7D4F; --amber: #9A6400; --red: #B3261E; --red-bg: #FCEBEA;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; font-size: 15px; }
-  body { min-height: 100vh; display: flex; flex-direction: column; }
-  button, input, select { font: inherit; color: inherit; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  a { color: var(--blue); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 48px; }
 
-  header { display: flex; align-items: center; gap: 20px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
-  header h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: .02em; }
-  header h1 span { color: var(--muted); font-weight: 500; }
-  #health { margin-left: auto; display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
-  .hd { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); }
-  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  header { border-bottom: 1px solid var(--rule); background: var(--paper); }
+  header .wrap { display: flex; align-items: baseline; gap: 16px; padding-top: 18px; padding-bottom: 14px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header .who { color: var(--sub); }
+  #status { margin-left: auto; color: var(--sub); font-size: 13px; }
+  #status span { margin-left: 14px; white-space: nowrap; }
+  #status b { font-weight: 600; }
+  .ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); } .off { color: var(--sub); }
 
-  #alert { display: none; align-items: center; gap: 20px; padding: 18px 24px; background: var(--urgent-bg);
-    border-bottom: 2px solid var(--bad); }
-  #alert.on { display: flex; }
-  #alert .what { font-size: 24px; font-weight: 700; }
-  #alert .when { color: #F5C2C2; }
-  #alert button { margin-left: auto; padding: 14px 28px; border-radius: 12px; border: 0; background: #FFFFFF;
-    color: #7A1A1A; font-weight: 800; font-size: 18px; cursor: pointer; }
+  #alert { display: none; background: var(--red-bg); border-bottom: 1px solid #F1C4C1; }
+  #alert.on { display: block; }
+  #alert .wrap { display: flex; align-items: center; gap: 16px; padding-top: 12px; padding-bottom: 12px; }
+  #alert strong { color: var(--red); }
 
-  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; padding: 18px 24px 24px; min-height: 0; }
-  .col { display: flex; flex-direction: column; gap: 18px; min-height: 0; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; }
-  .panel h2 { margin: 0 0 12px; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-  .sub { color: var(--muted); font-size: 13px; }
+  h2 { font-size: 17px; font-weight: 600; margin: 32px 0 4px; }
+  .note { color: var(--sub); font-size: 13px; margin: 0 0 14px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; gap: 0; } }
 
-  /* Ask */
-  #askForm { display: flex; gap: 10px; }
-  #askInput { flex: 1; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel2);
-    font-size: 18px; outline: none; }
-  #askInput:focus { border-color: var(--accent); }
-  .btn { padding: 12px 20px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; font-weight: 600; }
-  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  .btn:disabled { opacity: .5; cursor: default; }
-  #micBtn.listening { background: var(--bad); border-color: var(--bad); color: #fff; }
-  #askStatus { margin-top: 8px; min-height: 1.3em; }
-  .qcard { margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: var(--panel2); border: 1px solid var(--line); }
-  .qcard .q { font-size: 17px; font-weight: 600; }
-  .opts { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
-  .opt { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
-  .opt.chosen { background: var(--answer-bg); border-color: var(--answer); color: #DFF7F3; font-weight: 700;
-    outline: 2px solid var(--answer); }
-  .meta { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
-  .tag { padding: 2px 8px; border-radius: 999px; background: #3A2F12; color: #F2D58A; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; background: var(--paper); border: 1px solid var(--rule); }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; font-size: 13px; color: var(--sub); background: var(--soft); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.urgent td { background: var(--red-bg); }
+  tr.urgent td:first-child { box-shadow: inset 3px 0 var(--red); }
+  .scroll { max-height: 460px; overflow-y: auto; border: 1px solid var(--rule); }
+  .scroll table { border: 0; }
+  .muted { color: var(--sub); }
 
-  /* Conversation */
-  #convoPanel { flex: 1; display: flex; flex-direction: column; min-height: 280px; }
-  #convo { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; max-height: 52vh; }
-  .msg { max-width: 82%; padding: 9px 13px; border-radius: 14px; background: var(--panel2); border: 1px solid var(--line); }
-  .msg .t { font-size: 17px; }
-  .msg .m { font-size: 11px; color: var(--faint); margin-top: 3px; }
-  .msg.user { align-self: flex-start; }
-  .msg.caregiver { align-self: flex-end; background: #1D2B3F; border-color: #2D4566; }
-  .msg.answer { border-color: var(--answer); background: var(--answer-bg); }
-  .msg.urgent { border-color: var(--bad); background: #3A1717; }
-  .empty { color: var(--faint); font-style: italic; }
+  .btn { text-decoration: none; display: inline-block; padding: 7px 14px; border: 1px solid #C9C9C4; border-radius: 6px; background: var(--paper); cursor: pointer; }
+  .btn:hover { background: var(--soft); }
+  .btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
 
-  /* Under the hood */
-  canvas { width: 100%; height: 120px; display: block; background: var(--panel2); border-radius: 10px; }
-  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  #events { margin: 10px 0 0; padding: 0; list-style: none; font: 12px ui-monospace, Menlo, monospace; color: var(--muted);
-    max-height: 140px; overflow-y: auto; }
-  #events li { padding: 3px 0; border-bottom: 1px solid var(--line); display: flex; gap: 12px; }
-  #events b { color: var(--text); width: 52px; }
-  #camScene { font-size: 16px; margin-bottom: 8px; }
-  .qr { background: #fff; padding: 10px; border-radius: 10px; width: 164px; height: 164px; }
-  .qr img, .qr canvas { width: 144px !important; height: 144px !important; }
-  .qrcap { margin-top: 6px; max-width: 220px; word-break: break-all; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .chip { padding: 5px 10px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--line); font-size: 14px; }
-
-  /* Add phrase */
-  #phraseForm { display: flex; gap: 8px; }
-  #phraseText { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); }
-  #phraseCat { padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); }
-  #phraseStatus { margin-top: 8px; min-height: 1.3em; }
-
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } #health { flex-wrap: wrap; } }
+  .box { background: var(--paper); border: 1px solid var(--rule); padding: 16px; }
+  .consent { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; background: #FFF8E6;
+    border: 1px solid #EFD9A6; margin-bottom: 14px; }
+  .consent input { width: 18px; height: 18px; margin-top: 3px; flex: none; }
+  #voiceBox.locked .needs-consent { opacity: .4; pointer-events: none; }
+  .tabs { display: flex; border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
+  .tabs button { border: 0; background: none; padding: 8px 12px; cursor: pointer; color: var(--sub); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button.sel { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+  .vtab { display: none; } .vtab.sel { display: block; }
+  .passage { background: var(--soft); padding: 12px 14px; font-size: 16px; line-height: 1.6; }
+  #recTimer { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 3.5em; }
+  .meterTrack { height: 6px; background: var(--soft); flex: 1; min-width: 120px; }
+  .meterFill { height: 100%; width: 0; background: var(--green); }
+  .list { max-height: 220px; overflow-y: auto; border: 1px solid var(--rule); }
+  .list .item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--rule); }
+  .list .item span { flex: 1; }
+  #previewBox { display: none; border-top: 1px solid var(--rule); margin-top: 14px; padding-top: 12px; }
+  #voiceMsg { min-height: 1.4em; margin-top: 8px; }
+  textarea { width: 100%; padding: 8px 10px; border: 1px solid #C9C9C4; border-radius: 6px; resize: vertical; }
+  .qr { background: #fff; border: 1px solid var(--rule); padding: 8px; width: 156px; height: 156px; }
+  .stat { display: inline-block; margin-right: 28px; }
+  .stat b { display: block; font-size: 22px; font-weight: 600; }
+  .stat span { color: var(--sub); font-size: 13px; }
 </style>
 </head>
 <body>
-<header>
-  <h1>SOMEBODY <span id="who">· Caregiver</span></h1>
-  <div id="health">
-    <span class="hd" id="h-sensor"><span class="dot"></span>Sensor</span>
-    <span class="hd" id="h-phone"><span class="dot"></span>Phone</span>
-    <span class="hd" id="h-gemini"><span class="dot"></span>Gemini</span>
-    <span class="hd" id="h-elevenlabs"><span class="dot"></span>ElevenLabs</span>
-    <span class="hd" id="h-internet"><span class="dot"></span>Internet</span>
-    <span class="hd" id="h-dash"><span class="dot"></span>Dashboard link</span>
-    <span class="hd" id="h-tunnel"><span class="dot"></span><span id="tunnelText">Phone link</span></span>
-  </div>
-</header>
+<header><div class="wrap">
+  <h1>Sirenize</h1><span class="who" id="who">Caregiver</span>
+  <div id="status">connecting…</div>
+</div></header>
 
-<section id="alert" role="alert">
-  <div>
-    <div class="what" id="alertText"></div>
-    <div class="when" id="alertWhen"></div>
-  </div>
-  <button id="ackBtn">On my way</button>
-</section>
+<div id="alert"><div class="wrap">
+  <div><strong>Urgent:</strong> <span id="alertText"></span> <span class="muted" id="alertWhen"></span></div>
+  <button class="btn" id="dismissBtn" style="margin-left:auto">Dismiss</button>
+</div></div>
 
-<main>
-  <div class="col">
-    <section class="panel">
-      <h2>Ask a question</h2>
-      <form id="askForm">
-        <input id="askInput" autocomplete="off" placeholder="Ask a question…">
-        <button type="button" class="btn" id="micBtn" title="Dictate (Chrome)" hidden>Mic</button>
-        <button type="submit" class="btn primary" id="sendBtn">Send</button>
-      </form>
-      <div id="askStatus" class="sub"></div>
-      <div id="qlist"></div>
-    </section>
-
-    <section class="panel" id="convoPanel">
+<main class="wrap">
+  <div class="cols">
+    <section>
       <h2>Conversation</h2>
-      <div id="convo"><div class="empty" id="convoEmpty">Nothing said yet.</div></div>
+      <p class="note">Everything said on her screen, newest first. This page only reads; it never speaks or changes her screen.</p>
+      <div class="scroll"><table>
+        <thead><tr><th style="width:88px">Time</th><th>Said</th><th style="width:110px">How</th></tr></thead>
+        <tbody id="convo"><tr><td colspan="3" class="muted">Nothing said yet.</td></tr></tbody>
+      </table></div>
+    </section>
+
+    <section>
+      <h2>Voice</h2>
+      <p class="note" id="voiceCurrent">Loading…</p>
+      <div class="box locked" id="voiceBox">
+        <label class="consent"><input type="checkbox" id="consent">
+          <span>This is my voice, or I'm the user's authorized caregiver/guardian, and I consent to creating a voice clone.</span></label>
+        <div class="needs-consent">
+          <div class="tabs" id="vtabs">
+            <button data-t="record" class="sel">Record</button><button data-t="upload">Upload recordings</button>
+            <button data-t="pick">Choose a voice</button><button data-t="describe">Describe a voice</button>
+          </div>
+          <div class="vtab sel" id="t-record">
+            <div class="passage">Hi, it's me. I'm recording my voice so I can keep talking to the people I love.
+              Some days are harder than others, but I still have plenty to say. I like a good cup of coffee in the morning,
+              my favorite music, and long conversations with family and friends. Thank you for listening, and for helping me.
+              When you hear this voice, I hope it sounds just like me.</div>
+            <div class="row"><button class="btn" id="recBtn">Start recording</button><span id="recTimer">0:00</span>
+              <div class="meterTrack"><div class="meterFill" id="meter"></div></div></div>
+            <div class="note">Aim for one to two minutes. Reading it twice is fine.</div>
+          </div>
+          <div class="vtab" id="t-upload">
+            <p class="note">Voicemails, videos or voice memos (mp3, m4a, wav, mp4, mov) with only her speaking. Silences are trimmed.</p>
+            <input type="file" id="fileIn" multiple accept="audio/*,video/*,.m4a,.mp3,.wav,.mp4,.mov">
+          </div>
+          <div class="vtab" id="t-pick"><div class="list" id="vlist"><div class="item muted">Loading voices…</div></div></div>
+          <div class="vtab" id="t-describe">
+            <textarea id="vdesc" rows="2" placeholder="For example: a warm, calm woman's voice in her sixties with a soft Texas accent"></textarea>
+            <div class="row"><button class="btn" id="designBtn">Make previews</button></div>
+            <div class="list" id="designList" style="display:none"></div>
+          </div>
+          <div class="row" style="border-top:1px solid var(--rule);padding-top:12px;margin-top:14px">
+            <span id="sampleSecs" class="muted">Usable audio: 0 s</span>
+            <button class="btn primary" id="cloneBtn" disabled>Create voice</button>
+            <button class="btn" id="clearBtn">Clear audio</button>
+          </div>
+          <div id="previewBox">
+            <div id="previewTitle" style="font-weight:600"></div>
+            <div class="row" id="previewBtns"></div>
+            <div class="row"><button class="btn primary" id="approveBtn">Use this voice</button><button class="btn" id="redoBtn">Start over</button></div>
+          </div>
+          <div id="voiceMsg" class="muted"></div>
+          <div class="row" style="margin-top:4px"><button class="btn" id="deleteVoiceBtn">Delete voice</button>
+            <span class="muted" id="voicePlan" style="font-size:13px"></span></div>
+        </div>
+      </div>
     </section>
   </div>
 
-  <div class="col">
-    <section class="panel">
-      <h2>Head movements (last 60 s)</h2>
-      <canvas id="chart"></canvas>
-      <div class="legend"><span><i style="background:var(--lane-left)"></i>Left</span><span><i style="background:var(--lane-right)"></i>Right</span>
-        <span><i style="background:var(--lane-nod)"></i>Nod</span></div>
-      <div class="sub" style="font-size:12px;margin-top:4px">The sensor doesn't send angles in event mode, so movements are shown as markers.</div>
-      <ul id="events"></ul>
-    </section>
+  <h2>Connect a screen</h2>
+  <p class="note">Scan with an iPhone or iPad camera, open it in Safari, then tap <b>Talk here</b> on the screen that should speak. Every screen shows the same thing.</p>
+  <div class="row" style="align-items:flex-start;gap:32px">
+    <div><div id="qrGo" class="qr"></div><div class="note" style="margin-top:6px;max-width:220px">On the same hotspot or Wi-Fi as the board<br><span id="goLink" style="word-break:break-all"></span></div></div>
+    <div><div id="qrTunnel" class="qr"></div><div class="note" style="margin-top:6px;max-width:220px">From anywhere (changes if the board restarts)<br><span id="tunnelLink" style="word-break:break-all"></span></div></div>
+  </div>
 
-    <section class="panel">
-      <h2>Camera</h2>
-      <div id="camScene" class="empty">No camera frame yet.</div>
-      <div class="chips" id="camPhrases"></div>
-      <div class="meta" id="camMeta" style="margin-top:8px"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Add a device</h2>
-      <div class="sub" style="margin-bottom:10px">Scan with the iPad or iPhone camera, open in Safari, then tap <b>Talk here</b>.</div>
-      <div style="display:flex;gap:24px;flex-wrap:wrap">
-        <div><div id="qrGo" class="qr"></div><div class="sub qrcap">Same Wi-Fi / hotspot as the board<br><a id="goLink" style="color:inherit"></a></div></div>
-        <div><div id="qrTunnel" class="qr"></div><div class="sub qrcap">From anywhere (changes when the board restarts)<br><a id="tunnelLink" style="color:inherit"></a></div></div>
-      </div>
-      <div class="meta" id="devicesLine" style="margin-top:10px"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Add a phrase</h2>
-      <form id="phraseForm">
-        <input id="phraseText" maxlength="40" autocomplete="off" placeholder="e.g. Please open the window">
-        <select id="phraseCat">
-          <option value="care">Care / body</option>
-          <option value="comfort">Comfort / temperature</option>
-          <option value="social">People / social</option>
-          <option value="neutral" selected>General</option>
-          <option value="help">Help (urgent)</option>
-        </select>
-        <button class="btn" type="submit">Add</button>
-      </form>
-      <div id="phraseStatus" class="sub"></div>
-      <div class="chips" id="phraseList" style="margin-top:8px"></div>
-    </section>
+  <h2>Data</h2>
+  <p class="note">Collected on the board. Download it any time.</p>
+  <div id="stats"></div>
+  <div class="cols" style="margin-top:16px">
+    <div>
+      <table><thead><tr><th>Most used phrases</th><th class="num">Times</th></tr></thead><tbody id="topPhrases"></tbody></table>
+    </div>
+    <div>
+      <table><thead><tr><th>Selecting with head movements</th><th class="num">Picks</th><th class="num">Avg moves</th><th class="num">Avg time</th></tr></thead>
+        <tbody id="speed"></tbody></table>
+    </div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <a class="btn" href="/export/conversation.csv">Download conversation (CSV)</a>
+    <a class="btn" href="/export/selections.csv">Download selection timings (CSV)</a>
   </div>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
-let ws = null, userName = "them", caregiver = "", alertOn = null;
-const questions = new Map();
-const events = [];            // {ts, type, rtt}
-const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const SOURCE = { grid: "grid", suggested: "suggested", tap: "tapped", answer: "answer", question: "question", caregiver: "reply" };
+const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const HOW = { grid: "grid", suggested: "suggested", tap: "tapped", answer: "answer", caregiver: "message", heard: "someone said" };
+let userName = "her", alertOn = null, rows = 0;
 
-// ------------------------------------------------------------------ health
+// ------------------------------------------------------------------ status line
 function setHealth(h) {
-  for (const k of ["sensor", "phone", "gemini", "elevenlabs", "internet"]) {
-    const v = h[k] || {}, el = $("h-" + k);
-    el.querySelector(".dot").className = "dot " + (v.ok === true ? "ok" : v.ok === false ? (k === "phone" || k === "gemini" ? "warn" : "bad") : "");
-    if (k === "sensor" && v.ok === false) el.querySelector(".dot").className = "dot bad";
-    el.title = v.ok === true ? (k === "phone" && v.rtt != null ? `connected · round-trip ${v.rtt} ms` : "OK") : (v.err || "unknown");
-  }
+  const item = (label, v, okText, badText) => {
+    const cls = v.ok === true ? "ok" : v.ok === false ? "bad" : "off";
+    return `<span title="${esc(v.err || "")}">${label}: <b class="${cls}">${v.ok === true ? okText : v.ok === false ? badText : "not set up"}</b></span>`;
+  };
   const ph = h.phone || {};
-  if ($("devicesLine")) $("devicesLine").textContent = (ph.devices && ph.devices.length ? `Connected: ${ph.devices.join(", ")}` : "No talking screen connected") +
-    (ph.active ? ` · Talking on: ${ph.active}` : " · No device is talking");
-  setTunnel(h.tunnel);
-}
-function setTunnel(t) {
-  if (!t) return;
-  $("h-tunnel").querySelector(".dot").className = "dot " + (t.ok ? "ok" : "bad");
-  $("tunnelText").innerHTML = t.ok ? `Phone link: <a href="${esc(t.url)}" target="_blank" style="color:inherit">${esc(t.url.replace("https://", ""))}</a>` : "Phone link: starting…";
-  $("h-tunnel").title = t.ok ? "Bookmark on the phone: http://sirenize.local:8080/go" : (t.err || "");
-}
-function setLink(ok) {
-  $("h-dash").querySelector(".dot").className = "dot " + (ok ? "ok" : "bad");
-  $("h-dash").title = ok ? "dashboard connected to the server" : "reconnecting to the server…";
+  $("status").innerHTML =
+    item("Sensor", h.sensor || {}, "connected", "not responding") +
+    `<span>Screen: <b class="${ph.active ? "ok" : ph.ok ? "warn" : "bad"}">${ph.active ? esc(ph.active) : ph.ok ? "open, not talking" : "none open"}</b></span>` +
+    item("Voice", h.elevenlabs || {}, "ok", "error") +
+    item("Camera AI", h.gemini || {}, "ok", "error") +
+    item("Internet", h.internet || {}, "ok", "offline");
 }
 
 // ------------------------------------------------------------------ conversation
-function addConvo(e) {
-  $("convoEmpty")?.remove();
-  const urgent = alertOn && e.text === alertOn.text && Math.abs(e.ts - alertOn.ts) < 2000;
-  const side = e.source === "question" || e.source === "caregiver" ? "caregiver" : "user";
-  const who = side === "caregiver" ? (e.asker || caregiver || "Caregiver") : userName;
-  const div = document.createElement("div");
-  div.className = `msg ${side}` + (e.source === "answer" ? " answer" : "") + (urgent ? " urgent" : "");
-  div.innerHTML = `<div class="t">${esc(e.text)}</div><div class="m">${fmtTime(e.ts)} · ${esc(who)} · ${SOURCE[e.source] || e.source}</div>`;
-  const box = $("convo"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  box.appendChild(div);
-  if (atBottom) box.scrollTop = box.scrollHeight;
+function addRow(e, prepend = true) {
+  if (!rows) $("convo").innerHTML = "";
+  rows++;
+  const tr = document.createElement("tr");
+  if (e.urgent) tr.className = "urgent";
+  const heard = e.source === "heard";
+  tr.innerHTML = `<td class="muted">${fmtTime(e.ts)}</td><td${heard ? ' class="muted" style="font-style:italic"' : ""}>${heard ? "“" + esc(e.text) + "”" : esc(e.text)}</td><td class="muted">${esc(HOW[e.source] || e.source)}</td>`;
+  prepend ? $("convo").prepend(tr) : $("convo").appendChild(tr);
 }
 
-// ------------------------------------------------------------------ questions
-function renderQuestion(q) {
-  questions.set(q.id, q);
-  let card = document.getElementById("q-" + q.id);
-  if (!card) {
-    card = document.createElement("div");
-    card.className = "qcard"; card.id = "q-" + q.id;
-    $("qlist").prepend(card);
-    while ($("qlist").children.length > 6) $("qlist").lastChild.remove();
-  }
-  const status = q.status === "answered" ? `answered in ${(q.answer_ms / 1000).toFixed(1)} s`
-    : q.status === "expired" ? "no answer (cleared after 3 min)" : "waiting for an answer…";
-  card.innerHTML = `
-    <div class="q">${esc(q.question)}</div>
-    <div class="opts">${q.options.map((o) => `<span class="opt${q.answer === o ? " chosen" : ""}">${esc(o)}</span>`).join("")}</div>
-    <div class="meta">
-      ${q.fallback ? `<span class="tag" title="${esc(q.reason)}">Using basic answers (AI unavailable)</span>` : `<span>${esc(q.kind.replace("_", "/"))}</span>`}
-      <span>Gemini ${q.gemini_ms != null ? q.gemini_ms + " ms" : "–"}</span>
-      <span>on phone ${q.shown_ms != null ? (q.shown_ms / 1000).toFixed(2) + " s" : "–"}</span>
-      <span>${status}</span>
-    </div>`;
+// ------------------------------------------------------------------ data
+function setSummary(s) {
+  if (!s) return;
+  $("stats").innerHTML = `<span class="stat"><b>${s.today}</b><span>phrases today</span></span>
+    <span class="stat"><b>${s.total}</b><span>all time</span></span>
+    <span class="stat"><b>${s.urgent_today}</b><span>urgent today</span></span>
+    <span class="stat"><b>${(s.gestures.LEFT || 0) + (s.gestures.RIGHT || 0)}</b><span>tilts since start</span></span>
+    <span class="stat"><b>${s.gestures.NOD || 0}</b><span>nods since start</span></span>`;
+  $("topPhrases").innerHTML = s.top_phrases.length ? s.top_phrases.map(([p, n]) =>
+    `<tr><td>${esc(p)}</td><td class="num">${n}</td></tr>`).join("") : `<tr><td colspan="2" class="muted">No data yet.</td></tr>`;
+  const names = { suggested: "From suggestions", fixed: "From the main grid" };
+  const sp = Object.entries(s.speed);
+  $("speed").innerHTML = sp.length ? sp.map(([k, v]) =>
+    `<tr><td>${names[k] || k}</td><td class="num">${v.n}</td><td class="num">${v.avg_moves}</td><td class="num">${v.avg_seconds} s</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">No data yet.</td></tr>`;
 }
 
-$("askForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const question = $("askInput").value.trim();
-  if (!question) return;
-  $("sendBtn").disabled = true;
-  $("askStatus").textContent = "Thinking of answer options…";
-  const t0 = performance.now();
-  try {
-    const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.reason || r.status);
-    $("askInput").value = "";
-    const q = d.question;
-    $("askStatus").textContent = (q.fallback ? `Using basic answers (AI unavailable: ${q.reason}). ` : "") +
-      (d.phones ? `Sent to the phone in ${Math.round(performance.now() - t0)} ms.` : "No phone is connected, so it will appear when the phone reconnects… (not queued)");
-    renderQuestion(q);
-  } catch (err) {
-    $("askStatus").textContent = "Couldn't send: " + err.message;
-  } finally {
-    $("sendBtn").disabled = false;
-    $("askInput").focus();
-  }
-});
-
-// Optional dictation (Chrome's Web Speech API). Hidden when unsupported.
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (SR) {
-  const rec = new SR(); rec.lang = "en-US"; rec.interimResults = true;
-  $("micBtn").hidden = false;
-  $("micBtn").addEventListener("click", () => { try { rec.start(); } catch (e) {} });
-  rec.onstart = () => $("micBtn").classList.add("listening");
-  rec.onend = () => $("micBtn").classList.remove("listening");
-  rec.onresult = (e) => { $("askInput").value = [...e.results].map((r) => r[0].transcript).join(""); };
-  rec.onerror = () => $("micBtn").classList.remove("listening");
-}
-
-// ------------------------------------------------------------------ alerts (sound needs one click on the page first)
+// ------------------------------------------------------------------ urgent alerts (display only)
 let audioCtx = null, beepTimer = null;
 document.addEventListener("click", () => { if (!audioCtx) try { audioCtx = new AudioContext(); } catch (e) {} }, { once: true });
-document.addEventListener("keydown", () => { if (!audioCtx) try { audioCtx = new AudioContext(); } catch (e) {} }, { once: true });
 function beep() {
   if (!audioCtx) return;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-  o.frequency.value = 880; o.type = "sine";
+  o.frequency.value = 880;
   g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.02);
-  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
-  o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.55);
+  g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.45);
+  o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.5);
 }
 function showAlert(a) {
   alertOn = a;
-  $("alertText").textContent = `${userName} selected: “${a.text}”`;
-  $("alertWhen").textContent = "at " + fmtTime(a.ts) + (audioCtx ? "" : " · click anywhere on this page once to enable the alert sound");
+  $("alertText").textContent = `${userName} said “${a.text}”`;
+  $("alertWhen").textContent = "at " + fmtTime(a.ts);
   $("alert").classList.add("on");
-  const msgs = [...document.querySelectorAll("#convo .msg.user")].reverse();
-  const hit = msgs.find((el) => el.querySelector(".t").textContent === a.text);
-  if (hit) hit.classList.add("urgent");
-  clearInterval(beepTimer); beep(); beepTimer = setInterval(beep, 1500);
-  document.title = "ALERT · SOMEBODY";
+  clearInterval(beepTimer); beep(); beepTimer = setInterval(beep, 2000);
 }
-function clearAlert() {
-  alertOn = null; $("alert").classList.remove("on"); clearInterval(beepTimer); document.title = "SOMEBODY · Caregiver";
-}
-$("ackBtn").addEventListener("click", async () => {
-  $("ackBtn").disabled = true;
-  try { await fetch("/ack", { method: "POST" }); clearAlert(); } finally { $("ackBtn").disabled = false; }
-});
+function clearAlert() { alertOn = null; $("alert").classList.remove("on"); clearInterval(beepTimer); }
+$("dismissBtn").addEventListener("click", async () => { await fetch("/alert/clear", { method: "POST" }); clearAlert(); });
 
-// ------------------------------------------------------------------ camera
-function setCamera(c) {
-  if (!c || c.ok === null || c.ts == null) return;
-  if (c.ok) {
-    $("camScene").className = ""; $("camScene").textContent = c.scene || "–";
-    $("camPhrases").innerHTML = (c.phrases || []).map((p) => `<span class="chip">${esc(p)}</span>`).join("");
-  }
-  $("camMeta").innerHTML = `<span>Gemini ${c.ms != null ? c.ms + " ms" : "–"}</span>` +
-    (c.confidence != null ? `<span>confidence ${c.confidence.toFixed(2)}</span>` : "") +
-    `<span>${fmtTime(c.ts)}</span>` + (c.ok ? "" : `<span style="color:var(--warn)">last call failed: ${esc(c.reason)}</span>`);
+// ------------------------------------------------------------------ voice
+const MIC_HELP = "Recording needs a secure page: open this dashboard at http://localhost:8081 (see the setup notes).";
+async function getMic() {
+  if (!window.isSecureContext || !navigator.mediaDevices) throw new Error(MIC_HELP);
+  return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
 }
+function meter(stream, onLevel) {
+  const ctx = new AudioContext(), an = ctx.createAnalyser();
+  ctx.createMediaStreamSource(stream).connect(an); an.fftSize = 1024;
+  const buf = new Float32Array(an.fftSize); let alive = true;
+  (function tick() { if (!alive) return; an.getFloatTimeDomainData(buf);
+    let s = 0; for (const v of buf) s += v * v; onLevel(Math.sqrt(s / buf.length)); requestAnimationFrame(tick); })();
+  return () => { alive = false; ctx.close(); };
+}
+const pickMime = () => ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
 
-// ------------------------------------------------------------------ phrases
-function setPhrases(list) {
-  $("phraseList").innerHTML = (list || []).map((p) => `<span class="chip">${esc(p.text)}</span>`).join("") ||
-    `<span class="sub">No custom phrases yet (up to 4 fit on the phone).</span>`;
-}
-$("phraseForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const text = $("phraseText").value.trim();
-  if (!text) return;
+let voiceCandidate = null, recStream = null, recorder = null, recChunks = [], recStart = 0, recTimer = null, stopMeter = null;
+const consentOk = () => $("consent").checked;
+$("consent").addEventListener("change", () => $("voiceBox").classList.toggle("locked", !consentOk()));
+document.querySelectorAll("#vtabs button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#vtabs button").forEach((x) => x.classList.toggle("sel", x === b));
+  document.querySelectorAll(".vtab").forEach((t) => t.classList.toggle("sel", t.id === "t-" + b.dataset.t));
+  if (b.dataset.t === "pick") loadLibrary();
+}));
+const vmsg = (t) => { $("voiceMsg").textContent = t; };
+
+async function loadVoice() {
   try {
-    const r = await fetch("/phrases", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, category: $("phraseCat").value }) });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.reason);
-    $("phraseText").value = "";
-    $("phraseStatus").textContent = `Added “${text}” at the end of the grid. Voice: ${d.voice}.`;
-    setPhrases(d.phrases);
-  } catch (err) {
-    $("phraseStatus").textContent = "Couldn't add: " + err.message;
-  }
+    const d = await (await fetch("/voice")).json();
+    const v = d.voice;
+    $("voiceCurrent").textContent = v.is_user
+      ? `Her screen speaks with “${v.name}” (${v.source === "clone" ? "her own voice" : v.source === "designed" ? "designed voice" : "chosen voice"}, ${v.created ? new Date(v.created).toLocaleDateString() : ""}).`
+      : "Her screen uses the default voice. Create her own voice below.";
+    $("deleteVoiceBtn").disabled = !v.is_user;
+    $("voicePlan").textContent = d.plan ? `ElevenLabs ${d.plan} plan · ${d.can_clone ? "voice cloning available" : "voice cloning not on this plan"}` +
+      (d.credits ? ` · ${d.credits.used.toLocaleString()} of ${d.credits.limit.toLocaleString()} credits used` : "") : (d.plan_err || "");
+    setSamples(d.samples_seconds || 0);
+  } catch (e) {}
+}
+function setSamples(secs) {
+  $("sampleSecs").textContent = `Usable audio: ${secs} s` + (secs && secs < 30 ? " (60 s or more works best)" : "");
+  $("cloneBtn").disabled = secs < 10;
+}
+
+async function uploadBlobs(files) {
+  if (!consentOk()) return vmsg("Please confirm consent first.");
+  const fd = new FormData();
+  fd.append("consent", "yes");                       // must come before the audio
+  for (const f of files) fd.append("file", f, f.name || "recording.webm");
+  vmsg("Processing audio…");
+  const d = await (await fetch("/voice/upload", { method: "POST", body: fd })).json();
+  if (!d.ok) return vmsg(d.reason);
+  vmsg(d.added.length ? `Added ${d.added.map((a) => `${a.name} (${a.seconds} s)`).join(", ")}.` : "No speech found in that file.");
+  setSamples(d.total_seconds);
+}
+$("fileIn").addEventListener("change", (e) => { if (e.target.files.length) uploadBlobs([...e.target.files]); e.target.value = ""; });
+$("clearBtn").addEventListener("click", async () => { const d = await (await fetch("/voice/clear", { method: "POST" })).json(); setSamples(d.total_seconds); vmsg("Audio cleared."); });
+
+$("recBtn").addEventListener("click", async () => {
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  if (!consentOk()) return vmsg("Please confirm consent first.");
+  try { recStream = await getMic(); } catch (e) { return vmsg(e.message); }
+  recChunks = [];
+  recorder = new MediaRecorder(recStream, pickMime() ? { mimeType: pickMime() } : {});
+  recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+  recorder.onstop = () => {
+    clearInterval(recTimer); stopMeter && stopMeter(); recStream.getTracks().forEach((t) => t.stop());
+    $("recBtn").textContent = "Start recording"; $("meter").style.width = "0";
+    uploadBlobs([new File(recChunks, "recording.webm", { type: recorder.mimeType || "audio/webm" })]);
+  };
+  recorder.start(); recStart = Date.now();
+  stopMeter = meter(recStream, (rms) => { $("meter").style.width = Math.min(100, rms * 600) + "%"; });
+  recTimer = setInterval(() => { const s = Math.floor((Date.now() - recStart) / 1000); $("recTimer").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }, 250);
+  $("recBtn").textContent = "Stop recording";
 });
 
-// ------------------------------------------------------------------ events + chart
-function addEvent(m) {
-  events.push({ ts: m.server_ms, type: m.type, rtt: m.phone_rtt, source: m.source });
-  while (events.length > 300) events.shift();
-  const li = document.createElement("li");
-  li.innerHTML = `<b>${m.type}</b><span>${fmtTime(m.server_ms)}</span><span>${m.source}</span>` +
-    `<span>phone ${m.phone_rtt != null ? "≈" + Math.round(m.phone_rtt / 2) + " ms" : "–"}</span>`;
-  $("events").prepend(li);
-  while ($("events").children.length > 40) $("events").lastChild.remove();
-}
-const LANES = { LEFT: 0, RIGHT: 1, NOD: 2, HOME: 2 };
-const LANE_COLOR = () => {
-  const cs = getComputedStyle(document.documentElement);
-  return { LEFT: cs.getPropertyValue("--lane-left"), RIGHT: cs.getPropertyValue("--lane-right"),
-           NOD: cs.getPropertyValue("--lane-nod"), HOME: cs.getPropertyValue("--lane-home") };
-};
-function drawChart() {
-  const c = $("chart"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
-  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
-  const now = Date.now(), span = 60000, colors = LANE_COLOR(), laneH = h / 3;
-  g.font = "11px -apple-system, system-ui"; g.fillStyle = "#6B7480";
-  ["Left", "Right", "Nod"].forEach((n, i) => {
-    g.fillText(n, 6, i * laneH + laneH / 2 + 4);
-    g.strokeStyle = "#2E343C"; g.beginPath(); g.moveTo(44, (i + 1) * laneH - .5); g.lineTo(w, (i + 1) * laneH - .5); g.stroke();
-  });
-  for (const e of events) {
-    const x = 44 + (w - 52) * (1 - (now - e.ts) / span);
-    if (x < 44) continue;
-    const lane = LANES[e.type] ?? 2;
-    g.fillStyle = colors[e.type] || "#999";
-    g.beginPath(); g.roundRect(x - 3, lane * laneH + 6, 6, laneH - 12, 3); g.fill();
-  }
-  requestAnimationFrame(drawChart);
-}
-requestAnimationFrame(drawChart);
+$("cloneBtn").addEventListener("click", async () => {
+  if (!consentOk()) return vmsg("Please confirm consent first.");
+  $("cloneBtn").disabled = true; vmsg("Creating the voice. This takes about a minute.");
+  const d = await (await fetch("/voice/clone", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ consent: true, name: `${userName}'s voice` }) })).json();
+  if (!d.ok) { vmsg(`${d.reason}${d.fallback ? " " + d.fallback : ""}`); $("cloneBtn").disabled = false; return; }
+  vmsg(`Voice created in ${d.seconds} s. The recordings were deleted from the board. Listen, then choose.`);
+  setSamples(0);
+  showPreview({ voice_id: d.voice_id, name: d.name, source: "clone" });
+});
 
-// ------------------------------------------------------------------ add a device (QR codes)
-let qrShown = {};
+function showPreview(v) {
+  voiceCandidate = v;
+  $("previewBox").style.display = "block";
+  $("previewTitle").textContent = `Listen: ${v.name}`;
+  $("previewBtns").innerHTML = ["Hi, it's me.", "I love you.", "I need help."].map((t, i) =>
+    `<button class="btn" data-i="${i}">Play “${esc(t)}”</button>`).join("");
+  $("previewBtns").querySelectorAll("button").forEach((b) => b.addEventListener("click", () =>
+    new Audio(`/voice/preview?v=${encodeURIComponent(v.voice_id)}&i=${b.dataset.i}`).play()));
+}
+$("redoBtn").addEventListener("click", () => { $("previewBox").style.display = "none"; voiceCandidate = null; vmsg("Record or upload again."); });
+$("approveBtn").addEventListener("click", async () => {
+  if (!voiceCandidate) return;
+  const d = await (await fetch("/voice/approve", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(voiceCandidate) })).json();
+  if (!d.ok) return vmsg(d.reason);
+  $("previewBox").style.display = "none";
+  vmsg(`Saved. Re-making ${d.total} phrases in this voice…`);
+  loadVoice();
+});
+function onVoiceProgress(m) {
+  if (m.total) vmsg(m.running ? `Re-making phrases in the new voice: ${m.done} of ${m.total}` : `Done. ${m.done} of ${m.total} phrases are ready, and her screen now uses this voice.`);
+  if (!m.running) loadVoice();
+}
+$("deleteVoiceBtn").addEventListener("click", async () => {
+  if (!confirm("Delete this voice? It is removed from ElevenLabs and her screen goes back to the default voice.")) return;
+  const d = await (await fetch("/voice/delete", { method: "POST" })).json();
+  vmsg(d.ok ? `Deleted. ElevenLabs replied: ${d.api_response}. Her screen uses the default voice again.` : `Couldn't delete: ${d.reason}`);
+  loadVoice();
+});
+
+let libLoaded = false;
+async function loadLibrary() {
+  if (libLoaded) return;
+  const d = await (await fetch("/voice/library")).json();
+  if (!d.ok) { $("vlist").innerHTML = `<div class="item bad">${esc(d.reason)}</div>`; return; }
+  libLoaded = true;
+  $("vlist").innerHTML = d.voices.map((v) => `<div class="item"><span>${esc(v.name)} <span class="muted">${esc(Object.values(v.labels).join(", "))}</span></span>
+    ${v.preview_url ? `<button class="btn" data-play="${esc(v.preview_url)}">Play</button>` : ""}
+    <button class="btn" data-use="${esc(v.voice_id)}" data-name="${esc(v.name)}">Try</button></div>`).join("");
+  $("vlist").querySelectorAll("[data-play]").forEach((b) => b.addEventListener("click", () => new Audio(b.dataset.play).play()));
+  $("vlist").querySelectorAll("[data-use]").forEach((b) => b.addEventListener("click", () =>
+    showPreview({ voice_id: b.dataset.use, name: b.dataset.name, source: "premade" })));
+}
+
+$("designBtn").addEventListener("click", async () => {
+  const desc = $("vdesc").value.trim();
+  $("designBtn").disabled = true; vmsg("Making previews (10 to 20 seconds)…");
+  const d = await (await fetch("/voice/design", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description: desc }) })).json();
+  $("designBtn").disabled = false;
+  if (!d.ok) return vmsg(d.reason);
+  vmsg("Play each one and pick the closest.");
+  $("designList").style.display = "block";
+  $("designList").innerHTML = d.previews.map((p, i) => `<div class="item"><span>Option ${i + 1}</span>
+    <button class="btn" data-a="${i}">Play</button><button class="btn" data-save="${esc(p.generated_voice_id)}">Try this one</button></div>`).join("");
+  $("designList").querySelectorAll("[data-a]").forEach((b) => b.addEventListener("click", () => {
+    const p = d.previews[b.dataset.a]; new Audio(`data:${p.media_type};base64,${p.audio}`).play(); }));
+  $("designList").querySelectorAll("[data-save]").forEach((b) => b.addEventListener("click", async () => {
+    vmsg("Saving the designed voice…");
+    const s = await (await fetch("/voice/design/save", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ generated_voice_id: b.dataset.save, description: d.description, name: `${userName}'s voice` }) })).json();
+    if (!s.ok) return vmsg(s.reason);
+    showPreview({ voice_id: s.voice_id, name: s.name, source: "designed" });
+  }));
+});
+
+// ------------------------------------------------------------------ live data feed (read-only)
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onclose = () => { $("status").innerHTML = '<span class="bad">reconnecting…</span>'; setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "INIT") {
+      userName = m.name && !/first name/i.test(m.name) ? m.name : "her";
+      $("who").textContent = userName === "her" ? "Caregiver" : `Caregiver · ${userName}`;
+      rows = 0; $("convo").innerHTML = `<tr><td colspan="3" class="muted">Nothing said yet.</td></tr>`;
+      (m.conversation || []).filter((c) => c.source !== "question").forEach((c) => addRow(c));
+      setHealth(m.health); setSummary(m.summary);
+      if (m.alert) showAlert(m.alert); else clearAlert();
+    } else if (m.type === "CONVO" && m.entry.source !== "question") addRow(m.entry);
+    else if (m.type === "HEALTH") setHealth(m);
+    else if (m.type === "SUMMARY") setSummary(m.summary);
+    else if (m.type === "ALERT") { showAlert(m.alert); const r = $("convo").querySelector("tr"); if (r) r.className = "urgent"; }
+    else if (m.type === "ALERT_CLEAR") clearAlert();
+    else if (m.type === "VOICE_PROGRESS") onVoiceProgress(m);
+  };
+}
+// ------------------------------------------------------------------ connect a screen
+const qrShown = {};
 async function loadLinks() {
   try {
     const l = await (await fetch("/links")).json();
-    const show = (el, link, url) => {
-      $(link).textContent = url || "starting…"; $(link).href = url || "#";
-      if (!url || qrShown[el] === url) return;
-      qrShown[el] = url; $(el).innerHTML = "";
-      if (window.QRCode) new QRCode($(el), { text: url, width: 144, height: 144, correctLevel: QRCode.CorrectLevel.M });
-      else $(el).textContent = "QR library unavailable (offline)";
+    const show = (box, label, url) => {
+      $(label).textContent = url || "starting…";
+      if (!url || qrShown[box] === url) return;
+      qrShown[box] = url; $(box).innerHTML = "";
+      if (window.QRCode) new QRCode($(box), { text: url, width: 140, height: 140, correctLevel: QRCode.CorrectLevel.M });
+      else $(box).textContent = "QR needs internet on this computer";
     };
     show("qrGo", "goLink", l.go);
     show("qrTunnel", "tunnelLink", l.tunnel);
   } catch (e) {}
 }
-loadLinks(); setInterval(loadLinks, 15000);
+loadLinks(); setInterval(loadLinks, 20000);
 
-// ------------------------------------------------------------------ websocket
-function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=dashboard`);
-  ws.onopen = () => setLink(true);
-  ws.onclose = () => { setLink(false); setTimeout(connect, 1000); };
-  ws.onerror = () => ws.close();
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    switch (m.type) {
-      case "INIT":
-        userName = m.name || "them"; caregiver = m.caregiver || "";
-        $("who").textContent = `· ${userName}`;
-        $("askInput").placeholder = `Ask ${userName} a question…`;
-        $("convo").innerHTML = ""; (m.conversation || []).forEach(addConvo);
-        if (!m.conversation?.length) $("convo").innerHTML = `<div class="empty" id="convoEmpty">Nothing said yet.</div>`;
-        $("qlist").innerHTML = ""; (m.questions || []).forEach(renderQuestion);
-        setCamera(m.camera); setPhrases(m.phrases); setHealth(m.health);
-        if (m.alert) showAlert(m.alert); else clearAlert();
-        break;
-      case "HEALTH": setHealth(m); break;
-      case "CONVO": addConvo(m.entry); break;
-      case "QUESTION_UPDATE": renderQuestion(m.question); break;
-      case "ALERT": showAlert(m.alert); break;
-      case "ALERT_CLEAR": clearAlert(); break;
-      case "CAMERA": setCamera(m.camera); break;
-      case "PHRASES": setPhrases(m.phrases); break;
-      case "LEFT": case "RIGHT": case "NOD": case "HOME": addEvent(m); break;
-    }
-  };
-}
 connect();
-$("askInput").focus();
+loadVoice();
 </script>
 </body>
 </html>

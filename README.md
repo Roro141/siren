@@ -1,4 +1,4 @@
-# SOMEBODY: head-tilt communication glasses
+# Sirenize: head-tilt communication (formerly SOMEBODY)
 
 A head-worn tilt sensor lets someone pick and speak a phrase with no hands and no voice of their own:
 
@@ -16,7 +16,59 @@ The laptop is only a relay. The phone page does the UI and speech.
 
 ---
 
-## Hardware
+## Current version: Arduino UNO Q (`unoq/`)
+
+Everything runs on one **Arduino UNO Q** on a power bank. No laptop is needed. The top-level files are the original Mega + laptop version, kept as a backup.
+
+```
+GY-521 ──I²C──▶ UNO Q STM32 (sketch) ──Bridge──▶ UNO Q Linux: server.py ──WebSocket──▶ iPhone / iPad
+                                                        │  ElevenLabs (voice, speech-to-text)
+                                                        │  Gemini (camera + reply suggestions)
+                                                        └─ Cloudflare tunnel (HTTPS link for the screens)
+```
+
+| Part | What it does |
+|---|---|
+| `unoq/app/` | Sensor app: the sketch reads the GY-521 at 50 Hz and sends LEFT / RIGHT / NOD over the Bridge. The Python side forwards them to the server. |
+| `unoq/server.py --source bridge` | Port **8080**: the talking screen (behind the tunnel). Port **8088**: the caregiver dashboard (local network only). |
+| `unoq/public/index.html` | Talking screen for iPhone and iPad. One device taps **Talk here** and speaks; the others mirror it. Includes camera suggestions, listening, and her cloned voice. |
+| `unoq/public/dashboard.html` | Caregiver dashboard: **voice banking** (record, upload, choose or describe a voice) and **data** (conversation log, selection timings, CSV export). It only reads data: no typing, and it never speaks. |
+| `unoq/deploy/` | systemd services for the server and the tunnel. The tunnel restarts itself if Cloudflare expires it. |
+
+**Use it:** power the board, wait about a minute, then open `http://sirenize.local:8080/go` on the phone or iPad (or scan the QR code on the dashboard) and tap **Talk here**. Dashboard: `http://sirenize.local:8088`.
+
+**Keys** live only in the board's `.env` (`GEMINI_API_KEY`, `ELEVENLABS_API_KEY`) and are never committed. `SIRENIZE_ALERTS=off` turns off the urgent-phrase banner. Creating a file named `GEMINI_PAUSED` in the app folder stops all Gemini calls; the rest keeps working.
+
+### Sensing (real values from the code)
+- **Sensor:** GY-521 (MPU-6050) accelerometer at ±2 g with the on-chip ~44 Hz filter, read at **50 Hz** by the UNO Q's STM32U585.
+- **Angles:** roll = `atan2(ay, az)`, pitch = `atan2(−ax, √(ay²+az²))`, smoothed with **α = 0.2**, measured from a 1-second neutral calibration.
+- **Gestures:**
+  - Fire after **12°** held for **150 ms**, and re-arm only within **7°** of neutral.
+  - `FLIP_ROLL` and `FLIP_PITCH` are both `false`.
+  - A sensor whose data freezes (25 identical readings) is woken up automatically.
+
+### Test results (15 Nov 2026)
+| Test | Result |
+|---|---|
+| Tilt accuracy (Mega, one person, glasses) | LEFT 9/10, RIGHT 9/10, NOD 9/9. Stillness: 0 false triggers in 30 s of talking (max wobble 2.7° / 4.6°). |
+| Tilts on the UNO Q | Tilts and nods reach every connected screen; the highlight moves and nods speak. |
+| Several screens | iPhone and iPad stay in sync. Only the active one speaks. Takeover in about 56 ms (automated test, 12 of 12 checks). |
+| Her voice | ElevenLabs Instant Voice Clone, created in 76.7 s from 238 s of recordings. Phrases are cached on the board. |
+| Listening | Speech-to-text (`scribe_v2`) about 0.5–0.8 s; Gemini replies about 0.7–2.3 s; total about 1.5–3 s after the speaker stops. |
+| Camera | Scene suggestions in about 1.1–2.6 s once the camera is pointed at real objects (median 1.9 s on the UNO Q). |
+| Ask a question (caregiver) | Gemini about 0.9 s; the question appears on the phone about 0.12 s later. |
+| Phone round-trip | Median 116 ms over the UNO Q's tunnel. |
+
+**Models:** Gemini `gemini-3.5-flash-lite` (falls back to `gemini-3.1-flash-lite` and `gemini-3-flash-preview` when a daily quota runs out). ElevenLabs `eleven_flash_v2_5` (speech) and `scribe_v2` (speech-to-text).
+
+**Known limits:**
+- The free Gemini tier allows about 500 requests a day per project. The camera and listening together use about 5 a minute.
+- The tunnel link changes if the board restarts; the `/go` link always follows it.
+- iPhones play audio quietly while the mic is open, so the page releases the mic while speaking.
+
+---
+
+## Hardware (original Mega version)
 
 | Part | Notes |
 |---|---|

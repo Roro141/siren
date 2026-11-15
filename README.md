@@ -59,6 +59,13 @@ GY-521 ──I²C──▶ UNO Q STM32 (sketch) ──Bridge──▶ UNO Q Linu
 | Ask a question (caregiver) | Gemini about 0.9 s; the question appears on the phone about 0.12 s later. |
 | Phone round-trip | Median 116 ms over the UNO Q's tunnel. |
 
+### Tests
+Run these from `unoq/` on any computer with Python 3 and `aiohttp`. Gemini is paused during the tests, so they use no quota.
+- `python3 tests/check_server.py`: **24 checks**. It starts the server on spare ports and tests that the dashboard is separate from the public link, that two screens stay in sync, that tilts, nods and Home work, that only the active device can use the camera and microphone, that a takeover happens in under 1 s, that the active device is released 10 s after it disconnects, and that the data exports work.
+- `python3 tests/two_devices.py`: **12 checks** in headless Chrome with a simulated iPhone and iPad (layout, sync, only the active device speaks, takeover, refresh, release). It needs Chrome with `--remote-debugging-port=9223` and the server on port 8090.
+
+Last run (15 Nov 2026): **24/24** and **12/12** passed. On the live board: all services running, the public link hides the dashboard (404), and there were no server errors.
+
 **Models:** Gemini `gemini-3.5-flash-lite` (falls back to `gemini-3.1-flash-lite` and `gemini-3-flash-preview` when a daily quota runs out). ElevenLabs `eleven_flash_v2_5` (speech) and `scribe_v2` (speech-to-text).
 
 **Known limits:**

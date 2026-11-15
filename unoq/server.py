@@ -195,7 +195,7 @@ GEMINI_PAUSE_FILE = os.path.join(HERE, "GEMINI_PAUSED")   # touch this file to s
 
 
 def gemini_paused():
-    return os.path.exists(GEMINI_PAUSE_FILE)
+    return os.path.exists(GEMINI_PAUSE_FILE) or os.environ.get("SIRENIZE_GEMINI_PAUSED") == "1"
 
 
 def gemini_model():

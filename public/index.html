@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>SOMEBODY</title>
+<style>
+  :root {
+    --bg: #0f1115; --fg: #f4f4f5; --muted: #9ca3af; --tile: #1f2430;
+    --hi: #facc15; --hi-fg: #111; --ok: #16a34a; --bad: #dc2626; --flash: #22c55e;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; padding: max(12px, env(safe-area-inset-top)) 12px max(8px, env(safe-area-inset-bottom)); }
+
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #pill { padding: 6px 12px; border-radius: 999px; font-weight: 700; font-size: 15px; background: var(--bad); }
+  #pill.ok { background: var(--ok); }
+  #pill.warn { background: #ea580c; }
+  #cam { width: 96px; height: 72px; object-fit: cover; border-radius: 10px; background: #000; border: 2px solid #333; }
+
+  #said { min-height: 1.3em; margin: 12px 0; text-align: center; font-size: clamp(32px, 9vw, 64px);
+    font-weight: 800; line-height: 1.15; }
+
+  #grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3, 1fr); gap: 10px; }
+  .tile { display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px;
+    border-radius: 18px; background: var(--tile); font-size: clamp(22px, 6.5vw, 40px); font-weight: 700;
+    border: 4px solid transparent; transition: background .12s, transform .12s; }
+  .tile.hi { background: var(--hi); color: var(--hi-fg); border-color: #fff; transform: scale(1.03); }
+  .tile.flash { background: var(--flash); color: #fff; }
+
+  footer { margin-top: 8px; font: 12px ui-monospace, Menlo, monospace; color: var(--muted); text-align: center; }
+
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; background: var(--bg); z-index: 10; padding: 24px; text-align: center; }
+  #start button { font-size: 40px; font-weight: 800; padding: 28px 64px; border-radius: 24px; border: 0;
+    background: var(--hi); color: var(--hi-fg); }
+  #start p { color: var(--muted); font-size: 16px; max-width: 30em; }
+</style>
+</head>
+<body>
+<div id="start">
+  <button id="startBtn">Start</button>
+  <p>Tap to turn on sound and the camera.</p>
+</div>
+
+<header>
+  <span id="pill">Reconnecting…</span>
+  <video id="cam" autoplay playsinline muted></video>
+</header>
+<div id="said"></div>
+<main id="grid"></main>
+<footer id="debug">L 0 · R 0 · N 0 · rtt – ms</footer>
+
+<script>
+const PHRASES = ["I need water", "Bathroom", "I'm in pain", "Yes", "No", "Thank you"];
+const grid = document.getElementById("grid");
+const pill = document.getElementById("pill");
+const said = document.getElementById("said");
+const debug = document.getElementById("debug");
+const counts = { LEFT: 0, RIGHT: 0, NOD: 0 };
+let current = 0, rtt = null, ws = null, pingN = 0, mega = true;
+const pings = {};
+
+const tiles = PHRASES.map((p) => {
+  const el = document.createElement("div");
+  el.className = "tile";
+  el.textContent = p;
+  grid.appendChild(el);
+  return el;
+});
+
+function setPill() {
+  const open = ws && ws.readyState === WebSocket.OPEN;
+  pill.classList.toggle("ok", open && mega);
+  pill.classList.toggle("warn", open && !mega);
+  pill.textContent = !open ? "Reconnecting…" : mega ? "Connected" : "Headband disconnected";
+}
+
+function render() {
+  tiles.forEach((t, i) => t.classList.toggle("hi", i === current));
+  debug.textContent = `L ${counts.LEFT} · R ${counts.RIGHT} · N ${counts.NOD} · rtt ${rtt ?? "–"} ms`;
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.95;
+  speechSynthesis.speak(u);
+}
+
+function handle(type) {
+  if (!(type in counts)) return;
+  counts[type]++;
+  if (type === "RIGHT") current = (current + 1) % tiles.length;
+  if (type === "LEFT") current = (current - 1 + tiles.length) % tiles.length;
+  if (type === "NOD") {
+    const tile = tiles[current];
+    said.textContent = PHRASES[current];
+    tile.classList.add("flash");
+    setTimeout(() => tile.classList.remove("flash"), 600);
+    speak(PHRASES[current]);
+  }
+  render();
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = setPill;
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if ("mega" in m) {
+      mega = m.mega;
+      setPill();
+    } else if ("pong" in m && pings[m.pong]) {
+      rtt = Math.round(performance.now() - pings[m.pong]);
+      delete pings[m.pong];
+      ws.send(JSON.stringify({ rtt }));
+      render();
+    } else if (m.type) {
+      handle(m.type);
+    }
+  };
+  ws.onclose = () => {
+    setPill();
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    pings[++pingN] = performance.now();
+    ws.send(JSON.stringify({ ping: pingN }));
+  }
+}, 2000);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") handle("LEFT");
+  else if (e.key === "ArrowRight") handle("RIGHT");
+  else if (e.key === " ") { e.preventDefault(); handle("NOD"); }
+});
+
+document.getElementById("startBtn").addEventListener("click", async () => {
+  // iOS: speech only works after it is triggered once from a tap.
+  if ("speechSynthesis" in window) speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+  document.getElementById("start").remove();
+  try {
+    if (!navigator.mediaDevices) throw new Error("camera needs HTTPS");
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }, audio: false,
+    });
+    document.getElementById("cam").srcObject = stream;
+  } catch (err) {
+    debug.dataset.cam = "off";
+    console.warn("Camera:", err);
+    const cam = document.getElementById("cam");
+    cam.replaceWith(Object.assign(document.createElement("span"), {
+      textContent: "📷 " + (err.message || "blocked"), style: "font-size:12px;color:#9ca3af",
+    }));
+  }
+});
+
+render();
+connect();
+</script>
+</body>
+</html>

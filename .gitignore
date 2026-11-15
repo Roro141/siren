@@ -1,0 +1,11 @@
+# downloaded binaries
+bin/
+# logs and scratch output from test runs
+*.log
+tilt_log.txt
+diag.txt
+calib_check.txt
+cmd.queue
+# misc
+__pycache__/
+.DS_Store

@@ -12,3 +12,8 @@ __pycache__/
 
 # secrets
 .env
+
+# personal data (profile is sent to Gemini; never commit it)
+profile.json
+phrases.json
+trials.csv

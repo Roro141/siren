@@ -1,0 +1,3 @@
+name: Sirenize sensor
+icon: 🎯
+description: Reads the GY-521 head-tilt sensor and forwards LEFT/RIGHT/NOD events to the Sirenize server on this board.

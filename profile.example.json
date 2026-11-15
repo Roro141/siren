@@ -1,0 +1,11 @@
+{
+  "name": "Her first name",
+  "caregiver_name": "Sam",
+  "condition": "ALS",
+  "devices_used": ["head-tilt glasses", "iPhone on a mount"],
+  "people": [
+    {"name": "Sam", "relation": "caregiver"}
+  ],
+  "likes": ["example: Mavericks basketball games", "example: cooking shows", "example: iced tea"],
+  "urgent_phrases": ["I need help", "I'm in pain", "Suction please", "I can't breathe"]
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=Sirenize server (bridge mode)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/sirenize
+ExecStart=/home/arduino/sirenize/venv/bin/python -u server.py --source bridge
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

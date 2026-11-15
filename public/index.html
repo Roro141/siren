@@ -93,6 +93,15 @@
   .tile.hi { background: var(--accent); color: var(--accent-text); outline-color: var(--accent);
     transform: scale(1.04); z-index: 1; box-shadow: 0 0 0 2px var(--bg), 0 8px 24px rgba(0,0,0,.35); }
   .tile.pulse { animation: pulse 300ms ease-out; }
+  /* Answer options for a caregiver's question */
+  :root { --answer-bg: #1E3A36; --answer-edge: #3BA59B; --ask: #7DD3C7; }
+  :root[data-theme="light"] { --answer-bg: #E3F2EF; --answer-edge: #1F7A71; --ask: #1F6E66; }
+  #suggSection.asking #sugg .tile { background: var(--answer-bg); --edge: var(--answer-edge); }
+  #suggSection.asking .label { color: var(--ask); }
+  #spokenBar.asking { border-color: var(--answer-edge); }
+  #spokenBar.asking .label { color: var(--ask); }
+  #spokenBar.message .label { color: var(--ask); }
+  #grid.dense { grid-auto-rows: minmax(64px, 1fr); }
   @keyframes pulse {
     0%   { background: var(--pulse); color: var(--bg); outline-color: var(--pulse); }
     100% { background: var(--accent); color: var(--accent-text); }
@@ -149,13 +158,13 @@
 </div>
 
 <section id="spokenBar" aria-live="polite">
-  <div class="label">Spoken</div>
+  <div class="label" id="spokenLabel">Spoken</div>
   <div id="spoken" class="empty">Nothing yet</div>
 </section>
 
 <section id="suggSection">
   <div class="sectionHead">
-    <span class="label">Suggested</span>
+    <span class="label" id="suggLabel">Suggested</span>
     <svg id="offlineIcon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-label="offline">
       <path d="M2 2l20 20M5.8 5.8A7 7 0 0 0 6 19h11m3.5-2.2A4.5 4.5 0 0 0 17 10h-1.3A7 7 0 0 0 9.2 5.3"/>
     </svg>
@@ -233,6 +242,9 @@ let rtt = null, ws = null, pingN = 0, mega = true;
 let camReady = false, camFailed = false, inFlight = false, lastSentAt = 0, lastThumb = null;
 let failCount = 0, backoffUntil = 0, lastPredictMs = null;
 let voiceUnlocked = false, currentAudio = null, spokenTimer = null;
+let question = null, pendingQuestion = null, questionTimer = null;   // caregiver's question
+const QUESTION_IDLE_MS = 1000, QUESTION_TIMEOUT_MS = 3 * 60 * 1000;
+const gridItems = FIXED.slice();   // fixed phrases + custom ones appended at the end (never reordered)
 const pings = {};
 const audioCache = new Map();
 
@@ -244,15 +256,29 @@ function modeFromSettings() {
 const suggTiles = [0, 1, 2, 3].map(() => {
   const el = document.createElement("div"); el.className = "tile"; $("sugg").appendChild(el); return el;
 });
-const fixedTiles = FIXED.map((p) => {
+function makeGridTile(p) {
   const el = document.createElement("div");
   el.className = "tile"; el.textContent = p.text; el.dataset.cat = p.cat;
   $("grid").appendChild(el); return el;
-});
+}
+const fixedTiles = FIXED.map(makeGridTile);
+
+// Custom phrases from the caregiver dashboard: append new ones at the end, max 12 tiles total.
+function syncCustomPhrases(list) {
+  (list || []).forEach((p) => {
+    if (gridItems.length >= 12 || gridItems.some((g) => g.text.toLowerCase() === String(p.text).toLowerCase())) return;
+    const item = { text: String(p.text), cat: p.category || "neutral" };
+    gridItems.push(item);
+    fixedTiles.push(makeGridTile(item));
+  });
+  $("grid").classList.toggle("dense", gridItems.length > 9);
+  render();
+}
 
 // Scan order: suggestions first (unless hidden), then the fixed grid.
 function scanOrder() {
-  const fixed = fixedTiles.map((el, i) => ({ el, phrase: FIXED[i].text, source: "fixed", cancel: !!FIXED[i].cancel }));
+  const fixed = fixedTiles.map((el, i) => ({ el, phrase: gridItems[i].text, source: "fixed", cancel: !!gridItems[i].cancel }));
+  if (question) return suggTiles.map((el, i) => ({ el, phrase: question.options[i] || "", source: "answer" })).concat(fixed);
   if (mode === "hidden") return fixed;
   const sugg = suggTiles.map((el, i) => ({ el, phrase: suggestions.phrases[i] || "", source: "suggested" }));
   return sugg.concat(fixed);
@@ -277,19 +303,23 @@ function textLines(el) {
 
 function render() {
   const order = scanOrder();
-  suggTiles.forEach((el, i) => { el.textContent = suggestions.phrases[i] || ""; });
+  const rowPhrases = question ? question.options : suggestions.phrases;
+  suggTiles.forEach((el, i) => { el.textContent = rowPhrases[i] || ""; });
   [...suggTiles, ...fixedTiles].forEach(fitTile);
   [...suggTiles, ...fixedTiles].forEach((el) => el.classList.remove("hi"));
   if (current >= 0 && order[current]) order[current].el.classList.add("hi");
-  $("suggSection").classList.toggle("hidden", mode === "hidden");
-  $("suggSection").classList.toggle("offline", suggestions.source !== "camera");
+  $("suggSection").classList.toggle("hidden", mode === "hidden" && !question);
+  $("suggSection").classList.toggle("offline", !question && suggestions.source !== "camera");
+  $("suggSection").classList.toggle("asking", !!question);
+  $("suggLabel").textContent = question ? "Your answer" : "Suggested";
+  $("spokenBar").classList.toggle("asking", !!question);
   renderStatus();
 }
 
 function renderStatus() {
   const open = ws && ws.readyState === WebSocket.OPEN;
   $("connDot").className = "dot " + (!open ? "bad" : mega ? "ok" : "warn");
-  $("connText").textContent = !open ? "Reconnecting" : mega ? "Connected" : "Headband off";
+  $("connText").textContent = !open ? "Reconnecting" : mega ? "Connected" : "Headband not responding";
   const camOn = mode === "camera" && camReady;
   $("camDot").className = "dot " + (inFlight ? "sending" : camOn ? "ok" : "");
   $("camText").textContent = mode !== "camera" ? "Camera off" : camFailed ? "No camera" : inFlight ? "Looking" : "Camera";
@@ -380,6 +410,7 @@ function showSpoken(text) {
   const el = $("spoken");
   clearTimeout(spokenTimer);
   el.classList.remove("stale", "empty");
+  if (!question) { $("spokenLabel").textContent = "Spoken"; $("spokenBar").classList.remove("message"); }
   el.textContent = text;
   fitSpoken();
   spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
@@ -400,9 +431,22 @@ function select(item, logIt) {
     movesSinceSelect = 0; firstMoveAt = null;
     return;
   }
+  if (item.source === "answer" && question) {   // answer to the caregiver's question
+    const q = question;
+    speak(item.phrase);
+    wsSend({ type: "ANSWER", id: q.id, answer: item.phrase });
+    endQuestion();
+    current = -1;
+    setTimeout(() => showSpoken(item.phrase), 300);
+    if (item.phrase !== "Something else") recent = [item.phrase, ...recent.filter((p) => p !== item.phrase)].slice(0, 5);
+    movesSinceSelect = 0; firstMoveAt = null;
+    render();
+    return;
+  }
   speak(item.phrase);
   setTimeout(() => showSpoken(item.phrase), 300);
   recent = [item.phrase, ...recent.filter((p) => p !== item.phrase)].slice(0, 5);
+  wsSend({ type: "SAID", phrase: item.phrase, source: !logIt ? "tap" : item.source === "fixed" ? "grid" : "suggested" });
   if (logIt) {
     fetch("/log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
       phrase: item.phrase, source: item.source, moves_since_last_select: movesSinceSelect,
@@ -410,6 +454,51 @@ function select(item, logIt) {
     }) }).catch(() => {});
   }
   movesSinceSelect = 0; firstMoveAt = null;
+}
+
+// ------------------------------------------------------------------ caregiver questions
+function wsSend(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+
+function offerQuestion(m) { pendingQuestion = m; tryApplyQuestion(); }
+
+function tryApplyQuestion() {
+  if (!pendingQuestion) return;
+  if (performance.now() - lastTiltAt < QUESTION_IDLE_MS) return;   // user is moving: wait for a pause
+  question = pendingQuestion; pendingQuestion = null;
+  clearTimeout(questionTimer);
+  const id = question.id;
+  questionTimer = setTimeout(() => {           // unanswered after 3 min: clear quietly
+    if (question && question.id === id) { wsSend({ type: "EXPIRED", id }); endQuestion(); render(); }
+  }, QUESTION_TIMEOUT_MS);
+  clearTimeout(spokenTimer);
+  $("spokenLabel").textContent = (question.asker ? question.asker : "Someone") + " asks";
+  $("spoken").classList.remove("stale", "empty");
+  $("spoken").textContent = question.question;
+  fitSpoken();
+  current = 0;                                 // highlight the first answer
+  movesSinceSelect = 0; firstMoveAt = null;
+  render();
+  wsSend({ type: "SHOWN", id });
+}
+setInterval(tryApplyQuestion, 200);
+
+function endQuestion() {
+  clearTimeout(questionTimer);
+  question = null;
+  $("spokenLabel").textContent = "Spoken";
+  $("spoken").classList.add("stale");
+}
+
+function showMessage(text) {                   // e.g. "Sam is coming"
+  speak(text);
+  $("spokenBar").classList.add("message");
+  $("spokenLabel").textContent = "Message";
+  const el = $("spoken");
+  clearTimeout(spokenTimer);
+  el.classList.remove("stale", "empty");
+  el.textContent = text;
+  fitSpoken();
+  spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
 }
 
 function goHome() { current = -1; movesSinceSelect = 0; firstMoveAt = null; render(); }
@@ -503,7 +592,10 @@ function connect() {
       delete pings[m.pong];
       ws.send(JSON.stringify({ rtt }));
       renderStatus();
-    } else if (m.type) handle(m.type);
+    } else if (m.type === "QUESTION") offerQuestion(m);
+    else if (m.type === "SAY") showMessage(m.text);
+    else if (m.type === "PHRASES") syncCustomPhrases(m.phrases);
+    else if (m.type) handle(m.type);
   };
   ws.onclose = () => { setPill(); setTimeout(connect, 1000); };
   ws.onerror = () => ws.close();

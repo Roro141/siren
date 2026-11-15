@@ -1,0 +1,14 @@
+[Unit]
+Description=Sirenize Cloudflare quick tunnel
+Wants=network-online.target
+After=network-online.target sirenize-server.service
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/sirenize
+ExecStart=/home/arduino/sirenize/deploy/tunnel.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

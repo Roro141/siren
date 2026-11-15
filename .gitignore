@@ -9,3 +9,6 @@ cmd.queue
 # misc
 __pycache__/
 .DS_Store
+
+# secrets
+.env

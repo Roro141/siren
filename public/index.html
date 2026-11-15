@@ -2,89 +2,361 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#121417">
 <title>SOMEBODY</title>
 <style>
+  /* ------------------------------------------------------------ tokens */
   :root {
-    --bg: #0f1115; --fg: #f4f4f5; --muted: #9ca3af; --tile: #1f2430;
-    --hi: #facc15; --hi-fg: #111; --ok: #16a34a; --bad: #dc2626; --flash: #22c55e;
+    --bg: #121417; --surface: #1B1F24; --tile: #252A31; --tile-sugg: #212833;
+    --text: #F2F4F7; --muted: #A3ABB6; --faint: #6B7480; --line: #2E343C;
+    --accent: #FFD54A; --accent-text: #121417; --pulse: #FFFFFF;
+    --help-bg: #6B1D1D; --help-edge: #C2410C;
+    --cat-care: #3BA59B; --cat-comfort: #C9962B; --cat-social: #5B8BD6;
+    --cat-neutral: #7A828C; --cat-help: #E0574F;
+    --ok: #3FB27F; --warn: #D9A13B; --bad: #D95C5C;
+    --fs-tile: 22px; --fs-spoken: 44px;
+    --tile-min: 88px; --gap: 12px; --radius: 16px;
+    color-scheme: dark;
   }
+  :root[data-theme="light"] {
+    --bg: #F4F5F7; --surface: #FFFFFF; --tile: #FFFFFF; --tile-sugg: #EEF2F7;
+    --text: #111418; --muted: #4A525C; --faint: #7A828C; --line: #D5D9DF;
+    --accent: #FFD54A; --accent-text: #111418; --pulse: #111418;
+    --help-bg: #8E1F1F; --help-edge: #8E1F1F;
+    --cat-care: #1F7A71; --cat-comfort: #9A6B0F; --cat-social: #2F5FA8;
+    --cat-neutral: #6B7280; --cat-help: #B42318;
+    --ok: #1E7F52; --warn: #A26A00; --bad: #B42318;
+    color-scheme: light;
+  }
+  :root[data-size="large"]  { --fs-tile: 26px; --fs-spoken: 50px; }
+  :root[data-size="xlarge"] { --fs-tile: 30px; --fs-spoken: 56px; }
+  @media (max-height: 700px) { :root { --tile-min: 76px; } }
+
+  /* ------------------------------------------------------------ base */
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
-    font-family: -apple-system, system-ui, sans-serif; }
-  body { display: flex; flex-direction: column; padding: max(12px, env(safe-area-inset-top)) 12px max(8px, env(safe-area-inset-bottom)); }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "SF Pro Text", "SF Pro", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
+    display: flex; flex-direction: column; gap: 8px; height: 100dvh;
+    padding: max(12px, env(safe-area-inset-top)) 12px max(6px, env(safe-area-inset-bottom));
+  }
+  .label { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 
-  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  #pill { padding: 6px 12px; border-radius: 999px; font-weight: 700; font-size: 15px; background: var(--bad); }
-  #pill.ok { background: var(--ok); }
-  #pill.warn { background: #ea580c; }
-  #cam { width: 96px; height: 72px; object-fit: cover; border-radius: 10px; background: #000; border: 2px solid #333; }
+  /* ------------------------------------------------------------ spoken bar */
+  #spokenBar { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 8px 14px 10px; flex: none; }
+  /* Height reserves 2 lines at the 40px minimum; JS shrinks long phrases (never below 40px). */
+  #spoken { font-size: var(--fs-spoken); font-weight: 700; line-height: 1.08; letter-spacing: -.01em;
+    height: calc(40px * 1.08 * 2); display: flex; align-items: center;
+    overflow: hidden; transition: color .6s ease; }
+  #spoken.stale { color: var(--faint); }
+  #spoken.empty { color: var(--faint); font-weight: 500; font-size: 22px; }
 
-  #said { min-height: 1.3em; margin: 12px 0; text-align: center; font-size: clamp(32px, 9vw, 64px);
-    font-weight: 800; line-height: 1.15; }
+  /* ------------------------------------------------------------ suggested */
+  #suggSection { flex: none; }
+  #suggSection.hidden { display: none; }
+  .sectionHead { display: flex; align-items: center; gap: 6px; margin: 0 2px 6px; }
+  .sectionHead svg { width: 15px; height: 15px; stroke: var(--faint); }
+  #offlineIcon { display: none; }
+  #suggSection.offline #offlineIcon { display: inline-block; }
+  #sugg { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: var(--tile-min); gap: var(--gap); }
+  #sugg .tile { background: var(--tile-sugg); }
+  #seeing { margin: 6px 2px 0; font-size: 13px; color: var(--muted); height: 1.3em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-  #grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3, 1fr); gap: 10px; }
-  .tile { display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px;
-    border-radius: 18px; background: var(--tile); font-size: clamp(22px, 6.5vw, 40px); font-weight: 700;
-    border: 4px solid transparent; transition: background .12s, transform .12s; }
-  .tile.hi { background: var(--hi); color: var(--hi-fg); border-color: #fff; transform: scale(1.03); }
-  .tile.flash { background: var(--flash); color: #fff; }
+  /* ------------------------------------------------------------ fixed grid */
+  #grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: minmax(var(--tile-min), 1fr); gap: var(--gap); align-content: stretch; }
 
-  footer { margin-top: 8px; font: 12px ui-monospace, Menlo, monospace; color: var(--muted); text-align: center; }
+  /* ------------------------------------------------------------ tiles */
+  .tile {
+    position: relative; display: flex; align-items: center; justify-content: center; text-align: center;
+    padding: 8px 10px 8px 16px; border-radius: var(--radius); background: var(--tile); color: var(--text);
+    font-size: var(--fs-tile); font-weight: 600; line-height: 1.15;
+    border: 1px solid var(--line); outline: 6px solid transparent; outline-offset: -3px;
+    overflow-wrap: break-word; hyphens: auto; overflow: hidden;
+    transition: transform 120ms ease, background-color 120ms ease, outline-color 120ms ease, color 120ms ease;
+  }
+  #grid .tile { font-size: min(var(--fs-tile), 6.4vw); }
+  .tile::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: var(--edge, transparent); }
+  .tile[data-cat="care"]    { --edge: var(--cat-care); }
+  .tile[data-cat="comfort"] { --edge: var(--cat-comfort); }
+  .tile[data-cat="social"]  { --edge: var(--cat-social); }
+  .tile[data-cat="neutral"] { --edge: var(--cat-neutral); }
+  .tile[data-cat="help"]    { --edge: var(--cat-help); background: var(--help-bg); color: #FFFFFF; border-color: var(--help-edge); }
+  .tile:empty { opacity: .35; }
+  .tile.hi { background: var(--accent); color: var(--accent-text); outline-color: var(--accent);
+    transform: scale(1.04); z-index: 1; box-shadow: 0 0 0 2px var(--bg), 0 8px 24px rgba(0,0,0,.35); }
+  .tile.pulse { animation: pulse 300ms ease-out; }
+  @keyframes pulse {
+    0%   { background: var(--pulse); color: var(--bg); outline-color: var(--pulse); }
+    100% { background: var(--accent); color: var(--accent-text); }
+  }
 
-  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 16px; background: var(--bg); z-index: 10; padding: 24px; text-align: center; }
-  #start button { font-size: 40px; font-weight: 800; padding: 28px 64px; border-radius: 24px; border: 0;
-    background: var(--hi); color: var(--hi-fg); }
-  #start p { color: var(--muted); font-size: 16px; max-width: 30em; }
+  /* ------------------------------------------------------------ status strip */
+  #status { flex: none; display: flex; align-items: center; gap: 14px; padding: 6px 4px 0;
+    font-size: 12px; color: var(--muted); min-height: 30px; }
+  .stat { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .dot.sending { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 35%, transparent); }
+  #status .spacer { flex: 1; }
+  #cam { width: 36px; height: 27px; object-fit: cover; border-radius: 5px; background: #000; opacity: .75; flex: none; }
+
+  /* ------------------------------------------------------------ settings sheet */
+  #settings { position: fixed; inset: 0; z-index: 20; display: none; align-items: flex-end;
+    background: rgba(0,0,0,.55); }
+  #settings.open { display: flex; }
+  .sheet { width: 100%; max-height: 90dvh; overflow: auto; background: var(--surface); color: var(--text);
+    border-radius: 20px 20px 0 0; padding: 18px 16px max(18px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line); }
+  .sheet h2 { margin: 0 0 12px; font-size: 20px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0;
+    border-bottom: 1px solid var(--line); font-size: 16px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: var(--text); font: 600 14px/1 inherit;
+    font-family: inherit; padding: 10px 12px; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  .sheetBtn { margin-top: 14px; width: 100%; padding: 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--tile); color: var(--text); font: 600 16px inherit; font-family: inherit; }
+  #debug { margin-top: 12px; font: 12px ui-monospace, Menlo, monospace; color: var(--muted); }
+
+  /* ------------------------------------------------------------ start screen */
+  #start { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 18px; background: var(--bg); padding: 32px; text-align: center; }
+  #start h1 { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: .02em; }
+  #start p { margin: 0; color: var(--muted); font-size: 17px; max-width: 26em; line-height: 1.4; }
+  #startBtn { margin-top: 8px; font: 700 26px inherit; font-family: inherit; padding: 22px 56px; border-radius: 18px;
+    border: 0; background: var(--accent); color: var(--accent-text); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before { transition: none !important; animation: none !important; }
+    .tile.hi { transform: none; }
+  }
 </style>
 </head>
 <body>
 <div id="start">
-  <button id="startBtn">Start</button>
-  <p>Tap to turn on sound and the camera.</p>
+  <h1>SOMEBODY</h1>
+  <p>Tilt left or right to move. Nod to speak.</p>
+  <button id="startBtn">Begin</button>
+  <p style="font-size:14px">Turns on the voice and the camera.</p>
 </div>
 
-<header>
-  <span id="pill">Reconnecting…</span>
-  <video id="cam" autoplay playsinline muted></video>
-</header>
-<div id="said"></div>
+<section id="spokenBar" aria-live="polite">
+  <div class="label">Spoken</div>
+  <div id="spoken" class="empty">Nothing yet</div>
+</section>
+
+<section id="suggSection">
+  <div class="sectionHead">
+    <span class="label">Suggested</span>
+    <svg id="offlineIcon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-label="offline">
+      <path d="M2 2l20 20M5.8 5.8A7 7 0 0 0 6 19h11m3.5-2.2A4.5 4.5 0 0 0 17 10h-1.3A7 7 0 0 0 9.2 5.3"/>
+    </svg>
+  </div>
+  <div id="sugg"></div>
+  <div id="seeing"></div>
+</section>
+
 <main id="grid"></main>
-<footer id="debug">L 0 · R 0 · N 0 · rtt – ms</footer>
+
+<footer id="status" aria-label="Status (triple-tap for settings)">
+  <span class="stat"><span class="dot" id="connDot"></span><span id="connText">Connecting</span></span>
+  <span class="stat"><span class="dot" id="camDot"></span><span id="camText">Camera</span></span>
+  <span class="stat"><span class="dot" id="voiceDot"></span><span id="voiceText">Voice</span></span>
+  <span class="spacer"></span>
+  <video id="cam" autoplay playsinline muted></video>
+</footer>
+
+<div id="settings">
+  <div class="sheet">
+    <h2>Settings</h2>
+    <div class="row">Text size <span class="seg" data-key="size">
+      <button data-v="normal">Normal</button><button data-v="large">Large</button><button data-v="xlarge">Extra large</button></span></div>
+    <div class="row">Theme <span class="seg" data-key="theme">
+      <button data-v="dark">Dark</button><button data-v="light">Light</button></span></div>
+    <div class="row">Voice <span class="seg" data-key="voice">
+      <button data-v="on">On</button><button data-v="off">Off</button></span></div>
+    <div class="row">Camera suggestions <span class="seg" data-key="camera">
+      <button data-v="on">On</button><button data-v="off">Off</button></span></div>
+    <div class="row">Suggested row <span class="seg" data-key="row">
+      <button data-v="show">Show</button><button data-v="hide">Hide</button></span></div>
+    <button class="sheetBtn" id="homeBtn">Reset highlight to start</button>
+    <button class="sheetBtn" id="closeSettings">Close</button>
+    <div id="debug"></div>
+  </div>
+</div>
 
 <script>
-const PHRASES = ["I need water", "Bathroom", "I'm in pain", "Yes", "No", "Thank you"];
-const grid = document.getElementById("grid");
-const pill = document.getElementById("pill");
-const said = document.getElementById("said");
-const debug = document.getElementById("debug");
-const counts = { LEFT: 0, RIGHT: 0, NOD: 0 };
-let current = 0, rtt = null, ws = null, pingN = 0, mega = true;
-const pings = {};
+// ------------------------------------------------------------------ config
+// Fixed grid: never reorder. "I need help" is always first in the grid's scan order.
+const FIXED = [
+  { text: "I need help",  cat: "help" },
+  { text: "I need water", cat: "care" },
+  { text: "Bathroom",     cat: "care" },
+  { text: "I'm in pain",  cat: "care" },
+  { text: "Yes",          cat: "neutral" },
+  { text: "No",           cat: "neutral" },
+  { text: "Thank you",    cat: "social" },
+  { text: "Never mind",   cat: "neutral", cancel: true },
+];
+const IDLE_BEFORE_SWAP_MS = 3000;   // never swap suggestions within 3 s of a tilt
+const MIN_SEND_MS = 4000, MAX_SEND_MS = 20000, DIFF_THRESHOLD = 12;
+const MIN_CONFIDENCE = 0.4;
+const SPOKEN_FADE_MS = 10000;
+// TODO(/tts): set to true once server.py has GET /tts?text=... (ElevenLabs, Test 4).
+// Then suggestions are prefetched into audio blobs and NOD plays them instantly.
+const TTS_ENABLED = false;
 
-const tiles = PHRASES.map((p) => {
+// ------------------------------------------------------------------ settings (localStorage, guarded)
+const DEFAULTS = { size: "normal", theme: "dark", voice: "on", camera: "on", row: "show" };
+let settings = { ...DEFAULTS };
+try { Object.assign(settings, JSON.parse(localStorage.getItem("somebody.settings") || "{}")); } catch (e) {}
+function saveSettings() { try { localStorage.setItem("somebody.settings", JSON.stringify(settings)); } catch (e) {} }
+
+// ------------------------------------------------------------------ state
+const $ = (id) => document.getElementById(id);
+const counts = { LEFT: 0, RIGHT: 0, NOD: 0 };
+let mode = "camera";            // "camera" | "offline" (no frames) | "hidden" (fixed grid only)
+let current = -1;               // -1 = start (nothing highlighted); RIGHT -> first tile in scan order
+let suggestions = { phrases: [], source: "offline" };
+let pendingSugg = null;
+let lastTiltAt = 0, movesSinceSelect = 0, firstMoveAt = null;
+let recent = [];
+let rtt = null, ws = null, pingN = 0, mega = true;
+let camReady = false, camFailed = false, inFlight = false, lastSentAt = 0, lastThumb = null;
+let failCount = 0, backoffUntil = 0, lastPredictMs = null;
+let voiceUnlocked = false, currentAudio = null, spokenTimer = null;
+const pings = {};
+const audioCache = new Map();
+
+function modeFromSettings() {
+  return settings.row === "hide" ? "hidden" : settings.camera === "on" ? "camera" : "offline";
+}
+
+// ------------------------------------------------------------------ tiles
+const suggTiles = [0, 1, 2, 3].map(() => {
+  const el = document.createElement("div"); el.className = "tile"; $("sugg").appendChild(el); return el;
+});
+const fixedTiles = FIXED.map((p) => {
   const el = document.createElement("div");
-  el.className = "tile";
-  el.textContent = p;
-  grid.appendChild(el);
-  return el;
+  el.className = "tile"; el.textContent = p.text; el.dataset.cat = p.cat;
+  $("grid").appendChild(el); return el;
 });
 
-function setPill() {
-  const open = ws && ws.readyState === WebSocket.OPEN;
-  pill.classList.toggle("ok", open && mega);
-  pill.classList.toggle("warn", open && !mega);
-  pill.textContent = !open ? "Reconnecting…" : mega ? "Connected" : "Headband disconnected";
+// Scan order: suggestions first (unless hidden), then the fixed grid.
+function scanOrder() {
+  const fixed = fixedTiles.map((el, i) => ({ el, phrase: FIXED[i].text, source: "fixed", cancel: !!FIXED[i].cancel }));
+  if (mode === "hidden") return fixed;
+  const sugg = suggTiles.map((el, i) => ({ el, phrase: suggestions.phrases[i] || "", source: "suggested" }));
+  return sugg.concat(fixed);
+}
+
+// Tile text: max 2 lines, never truncated. Shrink only when needed, never below 22px.
+function fitTile(el) {
+  const key = el.textContent + "|" + settings.size + "|" + innerWidth;
+  if (el.dataset.fit === key) return;
+  el.dataset.fit = key;
+  el.style.fontSize = "";
+  let size = parseFloat(getComputedStyle(el).fontSize);
+  const tooBig = () => el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1 ||
+    (el.firstChild && textLines(el) > 2);
+  while (tooBig() && size > 22) { size -= 1; el.style.fontSize = size + "px"; }
+}
+function textLines(el) {
+  const r = document.createRange(); r.selectNodeContents(el);
+  const rects = [...r.getClientRects()];
+  return new Set(rects.map((x) => Math.round(x.top))).size;
 }
 
 function render() {
-  tiles.forEach((t, i) => t.classList.toggle("hi", i === current));
-  debug.textContent = `L ${counts.LEFT} · R ${counts.RIGHT} · N ${counts.NOD} · rtt ${rtt ?? "–"} ms`;
+  const order = scanOrder();
+  suggTiles.forEach((el, i) => { el.textContent = suggestions.phrases[i] || ""; });
+  [...suggTiles, ...fixedTiles].forEach(fitTile);
+  [...suggTiles, ...fixedTiles].forEach((el) => el.classList.remove("hi"));
+  if (current >= 0 && order[current]) order[current].el.classList.add("hi");
+  $("suggSection").classList.toggle("hidden", mode === "hidden");
+  $("suggSection").classList.toggle("offline", suggestions.source !== "camera");
+  renderStatus();
+}
+
+function renderStatus() {
+  const open = ws && ws.readyState === WebSocket.OPEN;
+  $("connDot").className = "dot " + (!open ? "bad" : mega ? "ok" : "warn");
+  $("connText").textContent = !open ? "Reconnecting" : mega ? "Connected" : "Headband off";
+  const camOn = mode === "camera" && camReady;
+  $("camDot").className = "dot " + (inFlight ? "sending" : camOn ? "ok" : "");
+  $("camText").textContent = mode !== "camera" ? "Camera off" : camFailed ? "No camera" : inFlight ? "Looking" : "Camera";
+  const voiceOn = settings.voice === "on";
+  $("voiceDot").className = "dot " + (voiceOn && voiceUnlocked ? "ok" : "");
+  $("voiceText").textContent = !voiceOn ? "Voice off" : voiceUnlocked ? "Voice ready" : "Voice";
+  $("debug").textContent = `L ${counts.LEFT} · R ${counts.RIGHT} · N ${counts.NOD} · rtt ${rtt ?? "–"} ms` +
+    ` · gemini ${lastPredictMs ?? "–"} ms · fails ${failCount} · mode ${mode}`;
+}
+
+// ------------------------------------------------------------------ offline suggestions
+function offlinePhrases() {
+  const d = new Date(), m = d.getHours() * 60 + d.getMinutes();
+  const out = [];
+  if (m >= 5 * 60 && m < 12 * 60) out.push("Good morning");
+  if ((m >= 11 * 60 + 30 && m <= 13 * 60 + 30) || (m >= 17 * 60 + 30 && m <= 19 * 60 + 30)) out.push("I'm hungry");
+  if (m >= 21 * 60 || m < 5 * 60) out.push("I'm tired");
+  recent.slice(0, 2).forEach((p) => out.push(p));
+  ["Can you help me?", "Please come here", "I'm cold", "Please wait"].forEach((p) => out.push(p));
+  return [...new Set(out)].slice(0, 4);
+}
+
+function offerSuggestions(s) {
+  // Always 4 tiles: fill gaps (e.g. phrases dropped for duplicating the fixed grid) with offline ones.
+  const seen = new Set(s.phrases.map((p) => p.toLowerCase()));
+  const fill = offlinePhrases().filter((p) => !seen.has(p.toLowerCase()));
+  pendingSugg = { ...s, phrases: [...s.phrases, ...fill].slice(0, 4) };
+  tryApplySuggestions();
+}
+
+function tryApplySuggestions() {
+  if (!pendingSugg) return;
+  if (performance.now() - lastTiltAt < IDLE_BEFORE_SWAP_MS) return;  // user is moving: wait
+  suggestions = pendingSugg; pendingSugg = null;
+  prefetchAudio(suggestions.phrases);
+  render();
+}
+setInterval(tryApplySuggestions, 250);
+
+function goOffline() {
+  offerSuggestions({ phrases: offlinePhrases(), source: "offline" });
+}
+
+// ------------------------------------------------------------------ speech
+function prefetchAudio(phrases) {
+  if (!TTS_ENABLED) return;
+  phrases.forEach((p) => {
+    if (!p || audioCache.has(p)) return;
+    fetch(`/tts?text=${encodeURIComponent(p)}`).then((r) => r.ok ? r.blob() : null)
+      .then((b) => { if (b) audioCache.set(p, URL.createObjectURL(b)); }).catch(() => {});
+  });
 }
 
 function speak(text) {
+  if (settings.voice !== "on") return;
+  // 1) prefetched clip  2) live /tts  3) speechSynthesis
+  if (TTS_ENABLED) {
+    const src = audioCache.get(text) || `/tts?text=${encodeURIComponent(text)}`;
+    stopSpeech();
+    currentAudio = new Audio(src);
+    currentAudio.play().catch(() => speakLocal(text));
+    return;
+  }
+  speakLocal(text);
+}
+
+function speakLocal(text) {
   if (!("speechSynthesis" in window)) return;
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
@@ -92,20 +364,132 @@ function speak(text) {
   speechSynthesis.speak(u);
 }
 
+function stopSpeech() {
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+}
+
+function fitSpoken() {
+  const el = $("spoken");
+  el.style.fontSize = "";
+  let size = parseFloat(getComputedStyle(el).fontSize);
+  while (el.scrollHeight > el.clientHeight + 1 && size > 40) { size -= 2; el.style.fontSize = size + "px"; }
+}
+
+function showSpoken(text) {
+  const el = $("spoken");
+  clearTimeout(spokenTimer);
+  el.classList.remove("stale", "empty");
+  el.textContent = text;
+  fitSpoken();
+  spokenTimer = setTimeout(() => el.classList.add("stale"), SPOKEN_FADE_MS);
+}
+
+// ------------------------------------------------------------------ gestures
+function pulse(el) {
+  el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse");
+  setTimeout(() => el.classList.remove("pulse"), 320);
+}
+
+function select(item, logIt) {
+  if (!item || !item.phrase) return;
+  pulse(item.el);
+  if (item.cancel) {                       // "Never mind": stop speech, don't speak or log
+    stopSpeech();
+    setTimeout(() => { $("spoken").classList.add("stale"); }, 300);
+    movesSinceSelect = 0; firstMoveAt = null;
+    return;
+  }
+  speak(item.phrase);
+  setTimeout(() => showSpoken(item.phrase), 300);
+  recent = [item.phrase, ...recent.filter((p) => p !== item.phrase)].slice(0, 5);
+  if (logIt) {
+    fetch("/log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      phrase: item.phrase, source: item.source, moves_since_last_select: movesSinceSelect,
+      ms_since_first_move: firstMoveAt ? Math.round(performance.now() - firstMoveAt) : 0,
+    }) }).catch(() => {});
+  }
+  movesSinceSelect = 0; firstMoveAt = null;
+}
+
+function goHome() { current = -1; movesSinceSelect = 0; firstMoveAt = null; render(); }
+
 function handle(type) {
+  if (type === "HOME") return goHome();
   if (!(type in counts)) return;
   counts[type]++;
-  if (type === "RIGHT") current = (current + 1) % tiles.length;
-  if (type === "LEFT") current = (current - 1 + tiles.length) % tiles.length;
+  const order = scanOrder(), n = order.length;
+  if (type === "LEFT" || type === "RIGHT") {
+    lastTiltAt = performance.now();
+    if (firstMoveAt === null) firstMoveAt = lastTiltAt;
+    movesSinceSelect++;
+    if (type === "RIGHT") current = current < 0 ? 0 : (current + 1) % n;
+    else current = current < 0 ? n - 1 : (current - 1 + n) % n;
+  }
   if (type === "NOD") {
-    const tile = tiles[current];
-    said.textContent = PHRASES[current];
-    tile.classList.add("flash");
-    setTimeout(() => tile.classList.remove("flash"), 600);
-    speak(PHRASES[current]);
+    lastTiltAt = performance.now();
+    if (current >= 0) select(order[current], true);
   }
   render();
 }
+
+// Tap a tile to speak it (touch fallback, not logged as a trial).
+document.addEventListener("click", (e) => {
+  const el = e.target.closest(".tile");
+  if (!el) return;
+  const item = scanOrder().find((o) => o.el === el);
+  if (item) select(item, false);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") handle("LEFT");
+  else if (e.key === "ArrowRight") handle("RIGHT");
+  else if (e.key === " ") { e.preventDefault(); handle("NOD"); }
+  else if (e.key === "Home" || e.key === "h") handle("HOME");
+});
+
+// No pinch-zoom on iOS (double-tap zoom is already off via touch-action: manipulation).
+["gesturestart", "gesturechange"].forEach((t) => document.addEventListener(t, (e) => e.preventDefault()));
+
+// ------------------------------------------------------------------ settings UI
+function applySettings() {
+  document.documentElement.dataset.theme = settings.theme;
+  document.documentElement.dataset.size = settings.size;
+  document.querySelector('meta[name="theme-color"]').content = settings.theme === "light" ? "#F4F5F7" : "#121417";
+  document.querySelectorAll(".seg").forEach((seg) => {
+    seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(settings[seg.dataset.key] === b.dataset.v)));
+  });
+  const newMode = modeFromSettings();
+  if (newMode !== mode) {
+    mode = newMode;
+    current = -1;
+    if (mode !== "camera") { $("seeing").textContent = ""; goOffline(); }
+    else { lastSentAt = 0; lastThumb = null; failCount = 0; backoffUntil = 0; }
+  }
+  if (settings.voice !== "on") stopSpeech();
+  if (!$("spoken").classList.contains("empty")) fitSpoken();
+  render();
+}
+
+document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", (e) => {
+  e.stopPropagation();
+  settings[b.parentElement.dataset.key] = b.dataset.v;
+  saveSettings();
+  applySettings();
+}));
+
+let taps = [];
+$("status").addEventListener("click", () => {
+  const now = Date.now();
+  taps = taps.filter((t) => now - t < 700).concat(now);
+  if (taps.length >= 3) { taps = []; $("settings").classList.add("open"); renderStatus(); }
+});
+$("closeSettings").addEventListener("click", () => $("settings").classList.remove("open"));
+$("settings").addEventListener("click", (e) => { if (e.target.id === "settings") $("settings").classList.remove("open"); });
+$("homeBtn").addEventListener("click", (e) => { e.stopPropagation(); goHome(); $("settings").classList.remove("open"); });
+
+// ------------------------------------------------------------------ websocket
+function setPill() { renderStatus(); }
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -113,22 +497,15 @@ function connect() {
   ws.onopen = setPill;
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
-    if ("mega" in m) {
-      mega = m.mega;
-      setPill();
-    } else if ("pong" in m && pings[m.pong]) {
+    if ("mega" in m) { mega = m.mega; setPill(); }
+    else if ("pong" in m && pings[m.pong]) {
       rtt = Math.round(performance.now() - pings[m.pong]);
       delete pings[m.pong];
       ws.send(JSON.stringify({ rtt }));
-      render();
-    } else if (m.type) {
-      handle(m.type);
-    }
+      renderStatus();
+    } else if (m.type) handle(m.type);
   };
-  ws.onclose = () => {
-    setPill();
-    setTimeout(connect, 1000);
-  };
+  ws.onclose = () => { setPill(); setTimeout(connect, 1000); };
   ws.onerror = () => ws.close();
 }
 
@@ -139,33 +516,104 @@ setInterval(() => {
   }
 }, 2000);
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowLeft") handle("LEFT");
-  else if (e.key === "ArrowRight") handle("RIGHT");
-  else if (e.key === " ") { e.preventDefault(); handle("NOD"); }
-});
+// ------------------------------------------------------------------ camera -> Gemini
+const video = $("cam");
+const thumbCanvas = Object.assign(document.createElement("canvas"), { width: 16, height: 16 });
+const thumbCtx = thumbCanvas.getContext("2d", { willReadFrequently: true });
+const frameCanvas = document.createElement("canvas");
 
-document.getElementById("startBtn").addEventListener("click", async () => {
+function grabThumb() {
+  thumbCtx.drawImage(video, 0, 0, 16, 16);
+  const px = thumbCtx.getImageData(0, 0, 16, 16).data, g = new Float32Array(256);
+  for (let i = 0; i < 256; i++) g[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+  return g;
+}
+
+function diff(a, b) {
+  let s = 0;
+  for (let i = 0; i < 256; i++) s += Math.abs(a[i] - b[i]);
+  return s / 256;
+}
+
+function grabJpegB64() {
+  const w = video.videoWidth, h = video.videoHeight, k = 512 / Math.max(w, h);
+  frameCanvas.width = Math.round(w * Math.min(1, k));
+  frameCanvas.height = Math.round(h * Math.min(1, k));
+  frameCanvas.getContext("2d").drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+  return frameCanvas.toDataURL("image/jpeg", 0.6).split(",", 2)[1];
+}
+
+async function sendFrame(thumb) {
+  inFlight = true; lastSentAt = performance.now(); lastThumb = thumb;
+  renderStatus();
+  const now = new Date();
+  let res = null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 6000);
+    const r = await fetch("/predict", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: ctrl.signal,
+      body: JSON.stringify({ image_b64: grabJpegB64(), recent,
+        local_time: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}` }),
+    });
+    clearTimeout(t);
+    res = await r.json();
+  } catch (err) {
+    res = { ok: false, reason: "network: " + (err.name || err) };
+  } finally {
+    inFlight = false;
+  }
+  if (mode !== "camera") { renderStatus(); return; }  // toggled off while the request was in flight
+  if (res.ok) {
+    failCount = 0; backoffUntil = 0; lastPredictMs = res.ms;
+    const unsure = res.confidence < MIN_CONFIDENCE;
+    $("seeing").textContent = unsure ? "Not sure what's in view. Keeping suggestions." : `Seeing: ${res.scene}`;
+    if (!unsure) offerSuggestions({ phrases: res.phrases, source: "camera" });
+    else if (suggestions.phrases.length === 0) goOffline();
+  } else {
+    failCount++;
+    backoffUntil = performance.now() + Math.min(4000 * 2 ** (failCount - 1), 30000);
+    $("seeing").textContent = "Using everyday suggestions";
+    console.warn("predict failed:", res.reason);
+    goOffline();
+  }
+  render();
+}
+
+setInterval(() => {
+  if (mode !== "camera" || !camReady || inFlight || video.readyState < 2) return;
+  const now = performance.now();
+  if (now < backoffUntil) return;
+  const since = now - lastSentAt;
+  if (since < MIN_SEND_MS) return;
+  const thumb = grabThumb();
+  if (!lastThumb || since >= MAX_SEND_MS || diff(thumb, lastThumb) > DIFF_THRESHOLD) sendFrame(thumb);
+}, 500);
+
+// ------------------------------------------------------------------ start
+$("startBtn").addEventListener("click", async (e) => {
+  e.stopPropagation();
   // iOS: speech only works after it is triggered once from a tap.
-  if ("speechSynthesis" in window) speechSynthesis.speak(new SpeechSynthesisUtterance(""));
-  document.getElementById("start").remove();
+  if ("speechSynthesis" in window) { speechSynthesis.speak(new SpeechSynthesisUtterance("")); voiceUnlocked = true; }
+  $("start").remove();
+  renderStatus();
   try {
     if (!navigator.mediaDevices) throw new Error("camera needs HTTPS");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" }, audio: false,
-    });
-    document.getElementById("cam").srcObject = stream;
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+    camReady = true;
   } catch (err) {
-    debug.dataset.cam = "off";
     console.warn("Camera:", err);
-    const cam = document.getElementById("cam");
-    cam.replaceWith(Object.assign(document.createElement("span"), {
-      textContent: "📷 " + (err.message || "blocked"), style: "font-size:12px;color:#9ca3af",
-    }));
+    camFailed = true;
+    video.style.display = "none";
+    $("seeing").textContent = "Camera unavailable. Using everyday suggestions.";
   }
+  renderStatus();
 });
 
-render();
+addEventListener("resize", () => { render(); if (!$("spoken").classList.contains("empty")) fitSpoken(); });
+mode = modeFromSettings();
+suggestions = { phrases: offlinePhrases(), source: "offline" };
+applySettings();
 connect();
 </script>
 </body>
